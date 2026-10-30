@@ -420,3 +420,34 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+func TestKeyGenerationCreatesParentDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	randomPath := filepath.Join(tmpDir, "random", "nested", "age-key.txt")
+	if err := GenerateKey(randomPath); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if !KeyExists(randomPath) {
+		t.Error("GenerateKey should create missing parent directories")
+	}
+
+	passPath := filepath.Join(tmpDir, "pass", "nested", "age-key.txt")
+	if err := GenerateKeyFromPassphrase(passPath, "test-passphrase"); err != nil {
+		t.Fatalf("GenerateKeyFromPassphrase: %v", err)
+	}
+	info, err := os.Stat(passPath)
+	if err != nil {
+		t.Fatalf("GenerateKeyFromPassphrase should create missing parent directories: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("key perms = %o, want 600", perm)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(passPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0700 {
+		t.Errorf("key dir perms = %o, want 700", perm)
+	}
+}

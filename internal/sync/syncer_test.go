@@ -33,7 +33,7 @@ func testSyncer(t *testing.T) (*Syncer, *mockStorage, string) {
 	}
 
 	store := newMockStorage()
-	cfg := &config.Config{}
+	cfg := &config.Config{SyncPaths: config.DefaultSyncPaths(claudeDir)}
 	syncer := NewSyncerWith(cfg, store, enc, state, claudeDir, true)
 
 	return syncer, store, claudeDir
@@ -165,7 +165,7 @@ func TestSyncerPull_DownloadsNewFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to load state2: %v", err)
 	}
-	syncer2 := NewSyncerWith(&config.Config{}, store, syncer1.encryptor, state2, claudeDir2, true)
+	syncer2 := NewSyncerWith(&config.Config{SyncPaths: config.DefaultSyncPaths(claudeDir2)}, store, syncer1.encryptor, state2, claudeDir2, true)
 
 	// Pull from syncer2
 	result, err := syncer2.Pull(ctx)
@@ -297,12 +297,11 @@ func TestSyncerPushMCP_WithServers(t *testing.T) {
 	syncer, _, _ := testSyncer(t)
 	ctx := context.Background()
 
-	// Override claudeJSONPath to a temp location
-	tmpDir := t.TempDir()
-	syncer.cfg.ClaudeJSONOverride = filepath.Join(tmpDir, "claude.json")
+	// Point mcp_sync.path at a temp location
+	claudeJSON := filepath.Join(t.TempDir(), "claude.json")
+	syncer.cfg.MCPSync = &config.MCPSyncConfig{Enabled: true, Path: claudeJSON}
 
 	// Write claude.json with mcpServers
-	claudeJSON := syncer.claudeJSONPath()
 	if err := os.MkdirAll(filepath.Dir(claudeJSON), 0755); err != nil {
 		t.Fatalf("Failed to create dir: %v", err)
 	}
@@ -368,7 +367,7 @@ func TestSyncerPullMCP_RoundTrip(t *testing.T) {
 		t.Fatalf("Failed to create claudeDir2: %v", err)
 	}
 	state2, _ := LoadStateFromDir(stateDir2)
-	syncer2 := NewSyncerWith(&config.Config{}, store, syncer1.encryptor, state2, claudeDir2, true)
+	syncer2 := NewSyncerWith(&config.Config{SyncPaths: config.DefaultSyncPaths(claudeDir2)}, store, syncer1.encryptor, state2, claudeDir2, true)
 	claudeJSON2 := filepath.Join(tmpDir2, "claude.json")
 	syncer2.cfg.ClaudeJSONOverride = claudeJSON2
 

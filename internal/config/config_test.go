@@ -10,72 +10,15 @@ import (
 	"github.com/tawanorg/claude-sync/internal/storage"
 )
 
-func TestScopedSyncPaths(t *testing.T) {
-	t.Run("sessions scope is limited to portable session data", func(t *testing.T) {
-		got := ScopedSyncPaths("sessions")
-		want := []string{"projects", "history.jsonl", "tasks", "plans"}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("ScopedSyncPaths(\"sessions\") = %v, want %v", got, want)
-		}
-		for _, p := range got {
-			if p == "plugins" {
-				t.Fatal("sessions scope must never include plugins (bundles node_modules/.venv)")
-			}
-		}
-	})
-
-	t.Run("full, empty, and unknown scopes return the complete SyncPaths", func(t *testing.T) {
-		for _, scope := range []string{"full", "", "bogus"} {
-			got := ScopedSyncPaths(scope)
-			if !reflect.DeepEqual(got, SyncPaths) {
-				t.Errorf("ScopedSyncPaths(%q) = %v, want full SyncPaths %v", scope, got, SyncPaths)
-			}
-		}
-	})
-}
-
-func TestConfigDirPath(t *testing.T) {
-	path := ConfigDirPath()
-	if path == "" {
-		t.Fatal("ConfigDirPath should not return empty string")
-	}
-
-	if !strings.HasSuffix(path, ConfigDir) {
-		t.Errorf("ConfigDirPath should end with '%s', got '%s'", ConfigDir, path)
-	}
-}
-
-func TestConfigFilePath(t *testing.T) {
-	path := ConfigFilePath()
-	if path == "" {
-		t.Fatal("ConfigFilePath should not return empty string")
-	}
-
-	if !strings.HasSuffix(path, ConfigFile) {
-		t.Errorf("ConfigFilePath should end with '%s', got '%s'", ConfigFile, path)
-	}
-}
-
-func TestStateFilePath(t *testing.T) {
-	path := StateFilePath()
-	if path == "" {
-		t.Fatal("StateFilePath should not return empty string")
-	}
-
-	if !strings.HasSuffix(path, StateFile) {
-		t.Errorf("StateFilePath should end with '%s', got '%s'", StateFile, path)
-	}
-}
-
-func TestAgeKeyFilePath(t *testing.T) {
-	path := AgeKeyFilePath()
-	if path == "" {
-		t.Fatal("AgeKeyFilePath should not return empty string")
-	}
-
-	if !strings.HasSuffix(path, AgeKeyFile) {
-		t.Errorf("AgeKeyFilePath should end with '%s', got '%s'", AgeKeyFile, path)
-	}
+// setEnvPaths points all three CLAUDE_SYNC_*_PATH variables into a fresh temp
+// dir and returns it.
+func setEnvPaths(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv(EnvConfigPath, filepath.Join(dir, "config.yaml"))
+	t.Setenv(EnvAgePath, filepath.Join(dir, "age-key.txt"))
+	t.Setenv(EnvStatePath, filepath.Join(dir, "state.json"))
+	return dir
 }
 
 func TestClaudeDir(t *testing.T) {
@@ -90,39 +33,21 @@ func TestClaudeDir(t *testing.T) {
 }
 
 func TestSaveAndLoad(t *testing.T) {
-	// Create a temporary directory to use as home
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	dir := setEnvPaths(t)
 
-	// Create config directory
-	configDir := filepath.Join(tmpDir, ConfigDir)
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("Failed to create config dir: %v", err)
-	}
-
-	// Create test config
 	cfg := &Config{
 		AccountID:       "test-account-id",
 		AccessKeyID:     "test-access-key",
 		SecretAccessKey: "test-secret-key",
 		Bucket:          "test-bucket",
-		EncryptionKey:   "~/.claude-sync/age-key.txt",
 	}
 
-	// Save config
-	configPath := filepath.Join(configDir, ConfigFile)
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		t.Fatalf("Failed to create config parent dir: %v", err)
-	}
-
-	// Write config manually since Save uses hardcoded path
 	data := `account_id: test-account-id
 access_key_id: test-access-key
 secret_access_key: test-secret-key
 bucket: test-bucket
-encryption_key_path: ~/.claude-sync/age-key.txt
 `
-	if err := os.WriteFile(configPath, []byte(data), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(data), 0600); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
@@ -146,9 +71,9 @@ encryption_key_path: ~/.claude-sync/age-key.txt
 		t.Errorf("Bucket mismatch: expected '%s', got '%s'", cfg.Bucket, loaded.Bucket)
 	}
 
-	// Check that ~ is expanded in encryption key path
-	if strings.HasPrefix(loaded.EncryptionKey, "~") {
-		t.Error("EncryptionKey should have ~ expanded")
+	// Key path always comes from $CLAUDE_SYNC_AGE_PATH
+	if want := filepath.Join(dir, "age-key.txt"); loaded.EncryptionKey != want {
+		t.Errorf("EncryptionKey = %q, want %q", loaded.EncryptionKey, want)
 	}
 
 	// Check that endpoint is auto-populated
@@ -159,8 +84,7 @@ encryption_key_path: ~/.claude-sync/age-key.txt
 }
 
 func TestLoadNotFound(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	setEnvPaths(t)
 
 	_, err := Load()
 	if err == nil {
@@ -172,34 +96,41 @@ func TestLoadNotFound(t *testing.T) {
 	}
 }
 
-func TestExists(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+func TestLoadRequiresEnv(t *testing.T) {
+	for _, v := range []string{EnvConfigPath, EnvAgePath} {
+		t.Run(v, func(t *testing.T) {
+			setEnvPaths(t)
+			t.Setenv(v, "")
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), v) {
+				t.Errorf("Load error = %v, want mention of %s", err, v)
+			}
+		})
+	}
+}
 
-	// Should not exist initially
+func TestExists(t *testing.T) {
+	dir := setEnvPaths(t)
+
 	if Exists() {
 		t.Error("Exists should return false when config doesn't exist")
 	}
 
-	// Create config file
-	configDir := filepath.Join(tmpDir, ConfigDir)
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("Failed to create config dir: %v", err)
-	}
-
-	configPath := filepath.Join(configDir, ConfigFile)
-	if err := os.WriteFile(configPath, []byte("test"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("test"), 0600); err != nil {
 		t.Fatalf("Failed to create config file: %v", err)
 	}
-
-	// Should exist now
 	if !Exists() {
 		t.Error("Exists should return true when config exists")
 	}
+
+	t.Setenv(EnvConfigPath, "")
+	if Exists() {
+		t.Error("Exists should return false when $CLAUDE_SYNC_CONFIG_PATH is unset")
+	}
 }
 
-func TestSyncPaths(t *testing.T) {
-	// Verify SyncPaths contains expected entries
+func TestDefaultSyncPaths(t *testing.T) {
+	// Verify the init template contains expected entries
 	expectedPaths := map[string]bool{
 		"CLAUDE.md":           false,
 		"settings.json":       false,
@@ -213,7 +144,7 @@ func TestSyncPaths(t *testing.T) {
 		"rules":               false,
 	}
 
-	for _, path := range SyncPaths {
+	for _, path := range DefaultSyncNames {
 		if _, ok := expectedPaths[path]; ok {
 			expectedPaths[path] = true
 		}
@@ -221,7 +152,44 @@ func TestSyncPaths(t *testing.T) {
 
 	for path, found := range expectedPaths {
 		if !found {
-			t.Errorf("Expected path '%s' not found in SyncPaths", path)
+			t.Errorf("Expected path '%s' not found in DefaultSyncNames", path)
+		}
+	}
+
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	for i, p := range DefaultSyncPaths(claudeDir) {
+		if want := filepath.Join(claudeDir, DefaultSyncNames[i]); p != want {
+			t.Errorf("DefaultSyncPaths[%d] = %q, want %q", i, p, want)
+		}
+	}
+}
+
+func TestRelSyncPath(t *testing.T) {
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	valid := map[string]string{
+		filepath.Join(claudeDir, "CLAUDE.md"):         "CLAUDE.md",
+		filepath.Join(claudeDir, "projects", "foo"):   "projects/foo",
+		filepath.Join(claudeDir, "a", "..", "agents"): "agents",
+	}
+	for in, want := range valid {
+		if got, err := RelSyncPath(in, claudeDir); err != nil || got != want {
+			t.Errorf("RelSyncPath(%q) = (%q, %v), want %q", in, got, err, want)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"CLAUDE.md",             // relative
+		"~/.claude/CLAUDE.md",   // not expanded
+		claudeDir,               // the root itself
+		filepath.Dir(claudeDir), // parent
+		filepath.Join(claudeDir, "..", ".ssh"),
+		claudeDir + "-other/x", // sibling sharing the prefix
+		"/etc/passwd",
+	}
+	for _, in := range invalid {
+		if got, err := RelSyncPath(in, claudeDir); err == nil {
+			t.Errorf("RelSyncPath(%q) = %q, want error", in, got)
 		}
 	}
 }
@@ -296,60 +264,6 @@ func TestIsLegacyConfig(t *testing.T) {
 	}
 }
 
-func TestConfigSaveAndLoad(t *testing.T) {
-	// Override config dir to temp dir
-	tmpDir := t.TempDir()
-	configDir := filepath.Join(tmpDir, ".claude-sync")
-
-	// We can't easily override ConfigDirPath, so test Save/Load via direct file ops
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	mcpEnabled := true
-	cfg := &Config{
-		EncryptionKey: "~/.claude-sync/age-key.txt",
-		Bucket:        "test-bucket",
-		AccountID:     "test-account",
-		Exclude:       []string{"*.tmp", "cache/**"},
-		MCPSync:       &mcpEnabled,
-	}
-
-	// Write config manually to test Load
-	configPath := filepath.Join(configDir, "config.yaml")
-	data := `bucket: test-bucket
-account_id: test-account
-encryption_key_path: "~/.claude-sync/age-key.txt"
-exclude:
-  - "*.tmp"
-  - "cache/**"
-mcp_sync: true
-`
-	if err := os.WriteFile(configPath, []byte(data), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify the file was written
-	readBack, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(readBack) == 0 {
-		t.Fatal("config file should not be empty")
-	}
-
-	// Verify expected fields in the written content
-	content := string(readBack)
-	if !strings.Contains(content, "test-bucket") {
-		t.Error("config should contain bucket name")
-	}
-	if !strings.Contains(content, "mcp_sync") {
-		t.Error("config should contain mcp_sync field")
-	}
-
-	_ = cfg // cfg used for reference
-}
-
 func TestIsExcluded(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -413,131 +327,56 @@ func TestIsExcluded(t *testing.T) {
 	}
 }
 
-func TestGetEffectiveSyncPaths(t *testing.T) {
-	tests := []struct {
-		name      string
-		syncPaths []string
-		scope     string
-		wantLen   int
-	}{
-		{
-			name:      "empty SyncPaths returns defaults",
-			syncPaths: nil,
-			scope:     "",
-			wantLen:   len(SyncPaths),
-		},
-		{
-			name:      "custom SyncPaths overrides defaults",
-			syncPaths: []string{"CLAUDE.md", "settings.json"},
-			scope:     "",
-			wantLen:   2,
-		},
-		{
-			name:      "sessions scope without custom paths",
-			syncPaths: nil,
-			scope:     ScopeSessions,
-			wantLen:   len(SessionSyncPaths),
-		},
-		{
-			// Scope is a ceiling: an entirely out-of-scope custom list cannot
-			// widen a sessions config, and must not collapse to an empty set
-			// either, so it falls back to the scope defaults.
-			name:      "wholly out-of-scope custom paths fall back to sessions defaults",
-			syncPaths: []string{"custom-only"},
-			scope:     ScopeSessions,
-			wantLen:   len(SessionSyncPaths),
-		},
-		{
-			name:      "custom paths are narrowed to the sessions scope",
-			syncPaths: []string{"projects", "plugins", "CLAUDE.md"},
-			scope:     ScopeSessions,
-			wantLen:   1,
-		},
+func TestRequireSyncPaths(t *testing.T) {
+	claudeDir := t.TempDir()
+	for _, paths := range [][]string{nil, {}, {"projects"}, {filepath.Join(claudeDir, "projects"), "/etc"}} {
+		cfg := &Config{SyncPaths: paths, ClaudeDirOverride: claudeDir}
+		if err := cfg.RequireSyncPaths(); err == nil || !strings.Contains(err.Error(), "sync_paths") {
+			t.Errorf("RequireSyncPaths(%v) = %v, want sync_paths error", paths, err)
+		}
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{SyncPaths: tt.syncPaths, Scope: tt.scope}
-			got := cfg.GetEffectiveSyncPaths()
-			if len(got) != tt.wantLen {
-				t.Errorf("GetEffectiveSyncPaths() returned %d paths, want %d", len(got), tt.wantLen)
-			}
-		})
+	cfg := &Config{SyncPaths: []string{filepath.Join(claudeDir, "projects")}, ClaudeDirOverride: claudeDir}
+	if err := cfg.RequireSyncPaths(); err != nil {
+		t.Errorf("RequireSyncPaths with absolute entries: %v", err)
+	}
+	if rel, err := cfg.RelSyncPaths(claudeDir); err != nil || !reflect.DeepEqual(rel, []string{"projects"}) {
+		t.Errorf("RelSyncPaths = (%v, %v), want [projects]", rel, err)
 	}
 }
 
-// TestGetEffectiveSyncPathsScopeIsCeiling guards the regression that motivated
-// wiring up the override: `paths add|remove` materializes the full default path
-// list into sync_paths, so honoring that list verbatim would silently widen a
-// sessions-scoped config back into plugins/ (node_modules, .venv) on upgrade.
-func TestGetEffectiveSyncPathsScopeIsCeiling(t *testing.T) {
-	materialized := append([]string{}, SyncPaths...)
-	materialized = append(materialized, "my-extra-file.md")
-
-	cfg := &Config{SyncPaths: materialized, Scope: ScopeSessions}
-	got := cfg.GetEffectiveSyncPaths()
-
-	for _, p := range got {
-		if p == "plugins" {
-			t.Fatalf("sessions scope leaked plugins/ via sync_paths: %v", got)
-		}
+func TestIsExcludedAbsolutePattern(t *testing.T) {
+	claudeDir := t.TempDir()
+	cfg := &Config{Exclude: []string{
+		filepath.Join(claudeDir, "plugins", "**", "node_modules", "**"),
+		"/elsewhere/**", // outside ~/.claude: never matches
+	}}
+	if !cfg.IsExcludedUnder(claudeDir, "plugins/a/node_modules/x.js") {
+		t.Error("absolute pattern inside claudeDir should match")
 	}
-
-	for _, p := range got {
-		var inScope bool
-		for _, s := range SessionSyncPaths {
-			if p == s {
-				inScope = true
-				break
-			}
-		}
-		if !inScope {
-			t.Errorf("path %q is outside SessionSyncPaths but was returned", p)
-		}
-	}
-
-	if len(got) == 0 {
-		t.Error("effective sync paths must never be empty: an empty set makes " +
-			"DetectChanges report every tracked file as deleted, wiping the remote")
-	}
-}
-
-// TestGetEffectiveSyncPathsAppliedByFullScope covers the originally reported
-// bug: a custom sync_paths list under the default scope must be honored.
-func TestGetEffectiveSyncPathsAppliedByFullScope(t *testing.T) {
-	cfg := &Config{SyncPaths: []string{"CLAUDE.md", "my-extra-file.md"}}
-	got := cfg.GetEffectiveSyncPaths()
-
-	var found bool
-	for _, p := range got {
-		if p == "my-extra-file.md" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("custom sync_paths ignored under full scope: got %v", got)
+	if cfg.IsExcludedUnder(claudeDir, "projects/a/node_modules/x.js") {
+		t.Error("absolute pattern must only match its own location")
 	}
 }
 
 func TestIsMCPSyncEnabled(t *testing.T) {
 	tests := []struct {
 		name    string
-		mcpSync *bool
+		mcpSync *MCPSyncConfig
 		want    bool
 	}{
 		{
-			name:    "nil (unset) returns false",
+			name:    "nil (unset) defaults to true",
 			mcpSync: nil,
-			want:    false,
-		},
-		{
-			name:    "true returns true",
-			mcpSync: boolPtr(true),
 			want:    true,
 		},
 		{
-			name:    "false returns false",
-			mcpSync: boolPtr(false),
+			name:    "enabled returns true",
+			mcpSync: &MCPSyncConfig{Enabled: true},
+			want:    true,
+		},
+		{
+			name:    "disabled returns false",
+			mcpSync: &MCPSyncConfig{Enabled: false},
 			want:    false,
 		},
 	}
@@ -555,24 +394,211 @@ func TestIsMCPSyncEnabled(t *testing.T) {
 func TestSetMCPSync(t *testing.T) {
 	cfg := &Config{}
 
-	// Initially nil
-	if cfg.MCPSync != nil {
-		t.Error("MCPSync should be nil initially")
-	}
-
-	// Enable
+	// A missing block is created with ~/.claude.json
 	cfg.SetMCPSync(true)
-	if cfg.MCPSync == nil || !*cfg.MCPSync {
-		t.Error("SetMCPSync(true) should set MCPSync to true")
+	if cfg.MCPSync == nil || !cfg.MCPSync.Enabled || cfg.MCPSync.Path != ClaudeJSONPath() {
+		t.Errorf("SetMCPSync(true) on nil = %+v", cfg.MCPSync)
 	}
 
-	// Disable
+	// Toggling keeps a custom path
+	cfg.MCPSync.Path = "/custom/.claude.json"
 	cfg.SetMCPSync(false)
-	if cfg.MCPSync == nil || *cfg.MCPSync {
-		t.Error("SetMCPSync(false) should set MCPSync to false")
+	if cfg.MCPSync.Enabled || cfg.MCPSync.Path != "/custom/.claude.json" {
+		t.Errorf("SetMCPSync(false) = %+v, want disabled with custom path", cfg.MCPSync)
 	}
 }
 
-func boolPtr(b bool) *bool {
-	return &b
+func TestMCPConfigPath(t *testing.T) {
+	if got, err := (&Config{}).MCPConfigPath(); err != nil || got != ClaudeJSONPath() {
+		t.Errorf("nil block: (%q, %v), want %q", got, err, ClaudeJSONPath())
+	}
+	cfg := &Config{MCPSync: &MCPSyncConfig{Enabled: true, Path: "/abs/.claude.json"}}
+	if got, err := cfg.MCPConfigPath(); err != nil || got != "/abs/.claude.json" {
+		t.Errorf("absolute path: (%q, %v)", got, err)
+	}
+	for _, p := range []string{"", "relative/.claude.json", "~/.claude.json"} {
+		cfg := &Config{MCPSync: &MCPSyncConfig{Enabled: true, Path: p}}
+		if _, err := cfg.MCPConfigPath(); err == nil || !strings.Contains(err.Error(), "mcp_sync.path") {
+			t.Errorf("path %q: err = %v, want mcp_sync.path error", p, err)
+		}
+	}
+}
+
+func TestFilePathsFromEnv(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+
+	tests := []struct {
+		envVar string
+		fn     func() (string, error)
+	}{
+		{EnvConfigPath, ConfigFilePath},
+		{EnvAgePath, AgeKeyFilePath},
+		{EnvStatePath, StateFilePath},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.envVar+" unset is an error", func(t *testing.T) {
+			t.Setenv(tt.envVar, "")
+			_, err := tt.fn()
+			if err == nil || !strings.Contains(err.Error(), tt.envVar) {
+				t.Errorf("err = %v, want mention of %s", err, tt.envVar)
+			}
+		})
+
+		t.Run(tt.envVar+" absolute path", func(t *testing.T) {
+			want := filepath.Join(t.TempDir(), "custom", "file")
+			t.Setenv(tt.envVar, want)
+			if got, err := tt.fn(); err != nil || got != want {
+				t.Errorf("got (%q, %v), want %q", got, err, want)
+			}
+		})
+
+		t.Run(tt.envVar+" expands ~", func(t *testing.T) {
+			t.Setenv(tt.envVar, "~/elsewhere/file")
+			want := filepath.Join(home, "elsewhere", "file")
+			if got, err := tt.fn(); err != nil || got != want {
+				t.Errorf("got (%q, %v), want %q", got, err, want)
+			}
+		})
+	}
+}
+
+func TestCheckEnv(t *testing.T) {
+	setEnvPaths(t)
+	if err := CheckEnv(); err != nil {
+		t.Fatalf("CheckEnv with all vars set: %v", err)
+	}
+
+	t.Setenv(EnvAgePath, "")
+	t.Setenv(EnvStatePath, "")
+	err := CheckEnv()
+	if err == nil {
+		t.Fatal("CheckEnv should fail when vars are unset")
+	}
+	for _, v := range []string{EnvAgePath, EnvStatePath} {
+		if !strings.Contains(err.Error(), v) {
+			t.Errorf("error should name %s, got: %v", v, err)
+		}
+	}
+	if strings.Contains(err.Error(), EnvConfigPath+",") {
+		t.Errorf("error should not list %s as missing: %v", EnvConfigPath, err)
+	}
+}
+
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	tests := map[string]string{
+		"~":           home,
+		"~/a/b":       filepath.Join(home, "a", "b"),
+		"/abs/path":   "/abs/path",
+		"rel/path":    "rel/path",
+		"~other/file": "~other/file",
+	}
+	for in, want := range tests {
+		if got := expandHome(in); got != want {
+			t.Errorf("expandHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSaveAndLoadWithEnvPaths(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "nested", "dir", "config.yaml")
+	keyPath := filepath.Join(tmp, "keys", "age-key.txt")
+	t.Setenv(EnvConfigPath, configPath)
+	t.Setenv(EnvAgePath, keyPath)
+	t.Setenv(EnvStatePath, filepath.Join(tmp, "state.json"))
+
+	if err := Save(&Config{EncryptionKey: "/ignored", Bucket: "test-bucket"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("config not written to env path: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("config perms = %o, want 600", perm)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "encryption_key_path") {
+		t.Errorf("key path must not be written to config:\n%s", data)
+	}
+
+	// A legacy encryption_key_path in the file is ignored in favour of the env var
+	legacy := string(data) + "encryption_key_path: ~/.claude-sync/age-key.txt\n"
+	if err := os.WriteFile(configPath, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Bucket != "test-bucket" {
+		t.Errorf("Bucket = %q, want test-bucket", loaded.Bucket)
+	}
+	if loaded.EncryptionKey != keyPath {
+		t.Errorf("EncryptionKey = %q, want %q", loaded.EncryptionKey, keyPath)
+	}
+}
+
+func TestSyncSettingsRoundTrip(t *testing.T) {
+	dir := setEnvPaths(t)
+	configPath := filepath.Join(dir, "config.yaml")
+
+	t.Run("mcp_sync defaults to true when missing", func(t *testing.T) {
+		if err := os.WriteFile(configPath, []byte("sync_paths: [projects]\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.MCPSync == nil || !cfg.MCPSync.Enabled || cfg.MCPSync.Path != ClaudeJSONPath() {
+			t.Errorf("MCPSync = %+v, want enabled with %s", cfg.MCPSync, ClaudeJSONPath())
+		}
+	})
+
+	t.Run("sync_paths, exclude and mcp_sync are always written", func(t *testing.T) {
+		cfg := &Config{
+			SyncPaths: []string{"/home/u/.claude/projects"},
+			Exclude:   []string{"**/*.tmp"},
+			MCPSync:   &MCPSyncConfig{Enabled: false, Path: "/home/u/.claude.json"},
+		}
+		if err := Save(cfg); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"sync_paths:", "- /home/u/.claude/projects", "exclude:", "mcp_sync:", "enabled: false", "path: /home/u/.claude.json"} {
+			if !strings.Contains(string(data), key) {
+				t.Errorf("config missing %q:\n%s", key, data)
+			}
+		}
+		if strings.Contains(string(data), "scope:") {
+			t.Errorf("scope must no longer be written:\n%s", data)
+		}
+
+		loaded, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !reflect.DeepEqual(loaded.SyncPaths, cfg.SyncPaths) || !reflect.DeepEqual(loaded.Exclude, cfg.Exclude) {
+			t.Errorf("round trip = %v / %v, want %v / %v", loaded.SyncPaths, loaded.Exclude, cfg.SyncPaths, cfg.Exclude)
+		}
+		if loaded.IsMCPSyncEnabled() || loaded.MCPSync.Path != "/home/u/.claude.json" {
+			t.Errorf("mcp_sync not kept: %+v", loaded.MCPSync)
+		}
+	})
 }

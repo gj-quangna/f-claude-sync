@@ -3,43 +3,49 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/tawanorg/claude-sync/internal/config"
 )
 
 func TestNewManager(t *testing.T) {
-	// With empty paths, should use defaults
-	m := NewManager(nil, nil, "/tmp/test", config.ScopeFull)
-	if len(m.SyncPaths()) != len(DefaultSyncPaths(config.ScopeFull)) {
-		t.Errorf("Expected %d default paths, got %d", len(DefaultSyncPaths(config.ScopeFull)), len(m.SyncPaths()))
+	// Empty config lists stay empty: there is no built-in fallback
+	m := NewManager(nil, nil, "/tmp/test")
+	if len(m.SyncPaths()) != 0 {
+		t.Errorf("Expected no paths, got %v", m.SyncPaths())
 	}
 
-	// With custom paths, should use those
 	custom := []string{"path1", "path2"}
-	m = NewManager(custom, nil, "/tmp/test", config.ScopeFull)
-	if len(m.SyncPaths()) != 2 {
-		t.Errorf("Expected 2 paths, got %d", len(m.SyncPaths()))
+	m = NewManager(custom, nil, "/tmp/test")
+	if !reflect.DeepEqual(m.SyncPaths(), custom) {
+		t.Errorf("Expected %v, got %v", custom, m.SyncPaths())
+	}
+
+	// Mutating the manager must not alias the caller's slice
+	m.Remove("path1")
+	if custom[0] != "path1" {
+		t.Errorf("caller slice was mutated: %v", custom)
 	}
 }
 
 func TestAddPath(t *testing.T) {
-	m := NewManager([]string{"existing"}, nil, "/tmp/nonexistent", config.ScopeFull)
+	m := NewManager([]string{"/tmp/nonexistent/existing"}, nil, "/tmp/nonexistent")
 
 	// Add new path
-	result := m.Add("newpath")
+	result := m.Add("/tmp/nonexistent/newpath")
 	if !result.Added {
 		t.Error("Expected Added=true")
 	}
 	if result.PathMissing != true {
 		t.Error("Expected PathMissing=true for non-existent path")
 	}
-	if !m.HasPath("newpath") {
+	if !m.HasPath("/tmp/nonexistent/newpath") {
 		t.Error("newpath should be in sync paths")
 	}
 
 	// Add existing path
-	result = m.Add("existing")
+	result = m.Add("/tmp/nonexistent/existing")
 	if !result.AlreadyExists {
 		t.Error("Expected AlreadyExists=true")
 	}
@@ -49,14 +55,14 @@ func TestAddPath(t *testing.T) {
 }
 
 func TestAddPathRemovesConflictingExcludes(t *testing.T) {
-	m := NewManager([]string{"a"}, []string{"b", "b/*", "c/**"}, "/tmp/test", config.ScopeFull)
+	m := NewManager([]string{"/tmp/test/a"}, []string{"/tmp/test/b", "/tmp/test/b/*", "c/**"}, "/tmp/test")
 
 	// Add 'b' should remove 'b' and 'b/*' excludes
-	result := m.Add("b")
+	result := m.Add("/tmp/test/b")
 	if result.ExcludesRemoved != 2 {
 		t.Errorf("Expected 2 excludes removed, got %d", result.ExcludesRemoved)
 	}
-	if m.HasExclude("b") || m.HasExclude("b/*") {
+	if m.HasExclude("/tmp/test/b") || m.HasExclude("/tmp/test/b/*") {
 		t.Error("Conflicting excludes should be removed")
 	}
 	if !m.HasExclude("c/**") {
@@ -65,66 +71,28 @@ func TestAddPathRemovesConflictingExcludes(t *testing.T) {
 }
 
 func TestRemovePath(t *testing.T) {
-	m := NewManager([]string{"CLAUDE.md", "custom"}, nil, "/tmp/test", config.ScopeFull)
+	m := NewManager([]string{"/tmp/test/CLAUDE.md", "/tmp/test/custom"}, nil, "/tmp/test")
 
-	// Remove non-existent
 	result := m.Remove("nonexistent")
 	if !result.NotFound {
 		t.Error("Expected NotFound=true")
 	}
 
-	// Remove custom path (not a default)
-	result = m.Remove("custom")
+	result = m.Remove("/tmp/test/CLAUDE.md")
 	if !result.Removed {
 		t.Error("Expected Removed=true")
 	}
-	if result.IsDefault {
-		t.Error("'custom' is not a default path")
+	if m.HasPath("/tmp/test/CLAUDE.md") {
+		t.Error("CLAUDE.md should be removed")
 	}
-	if result.ExcludeAdded != "" {
-		t.Error("Custom path removal should not add exclude")
-	}
-
-	// Remove default path
-	m = NewManager([]string{"CLAUDE.md"}, nil, "/tmp/test", config.ScopeFull)
-	result = m.Remove("CLAUDE.md")
-	if !result.Removed {
-		t.Error("Expected Removed=true")
-	}
-	if !result.IsDefault {
-		t.Error("CLAUDE.md is a default path")
-	}
-	if result.ExcludeAdded == "" {
-		t.Error("Default path removal should add exclude")
-	}
-}
-
-func TestRemoveDefaultPathAddsExclude(t *testing.T) {
-	tmpDir := t.TempDir()
-	claudeDir := filepath.Join(tmpDir, ".claude")
-
-	// Create a directory to test dir detection
-	agentsDir := filepath.Join(claudeDir, "agents")
-	if err := os.MkdirAll(agentsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	m := NewManager(nil, nil, claudeDir, config.ScopeFull)
-
-	// Remove 'agents' (a directory)
-	result := m.Remove("agents")
-	if result.ExcludeAdded != "agents/*" {
-		t.Errorf("Expected exclude 'agents/*', got %q", result.ExcludeAdded)
-	}
-
-	// Verify exclude was added
-	if !m.HasExclude("agents/*") {
-		t.Error("Exclude should be in list")
+	// Removing only edits sync_paths; excludes are untouched
+	if len(m.Excludes()) != 0 {
+		t.Errorf("Remove should not add excludes, got %v", m.Excludes())
 	}
 }
 
 func TestAddExclude(t *testing.T) {
-	m := NewManager([]string{"plugins"}, []string{"existing/*"}, "/tmp/test", config.ScopeFull)
+	m := NewManager([]string{"plugins"}, []string{"existing/*"}, "/tmp/test")
 
 	// Add new exclude
 	result := m.AddExclude("plugins/**/node_modules/**")
@@ -149,7 +117,7 @@ func TestAddExclude(t *testing.T) {
 }
 
 func TestRemoveExclude(t *testing.T) {
-	m := NewManager(nil, []string{"a/*", "b/**"}, "/tmp/test", config.ScopeFull)
+	m := NewManager(nil, []string{"a/*", "b/**"}, "/tmp/test")
 
 	// Remove existing
 	result := m.RemoveExclude("a/*")
@@ -172,64 +140,27 @@ func TestReset(t *testing.T) {
 		[]string{"custom1", "custom2"},
 		[]string{"exclude1", "exclude2"},
 		"/tmp/test",
-		config.ScopeFull,
 	)
 
 	m.Reset()
 
-	if len(m.SyncPaths()) != len(DefaultSyncPaths(config.ScopeFull)) {
-		t.Errorf("Expected %d default paths after reset, got %d", len(DefaultSyncPaths(config.ScopeFull)), len(m.SyncPaths()))
+	if !reflect.DeepEqual(m.SyncPaths(), config.DefaultSyncPaths("/tmp/test")) {
+		t.Errorf("Expected DefaultSyncPaths after reset, got %v", m.SyncPaths())
 	}
 	if len(m.Excludes()) != 0 {
 		t.Errorf("Expected 0 excludes after reset, got %d", len(m.Excludes()))
 	}
-}
 
-func TestIsDefault(t *testing.T) {
-	m := NewManager(nil, nil, "/tmp/test", config.ScopeFull)
-
-	if !m.IsDefault("CLAUDE.md") {
-		t.Error("CLAUDE.md should be a default")
-	}
-	if !m.IsDefault("settings.json") {
-		t.Error("settings.json should be a default")
-	}
-	if m.IsDefault("custom-path") {
-		t.Error("custom-path should not be a default")
-	}
-}
-
-func TestStatus(t *testing.T) {
-	// Default state
-	m := NewManager(nil, nil, "/tmp/test", config.ScopeFull)
-	status := m.Status()
-	if status.IsCustomized {
-		t.Error("Default manager should not be customized")
-	}
-	if len(status.CustomPaths) != 0 {
-		t.Error("No custom paths expected")
-	}
-
-	// Add custom path
-	m.Add("my-custom")
-	status = m.Status()
-	if !status.IsCustomized {
-		t.Error("Should be customized after adding path")
-	}
-	if len(status.CustomPaths) != 1 || status.CustomPaths[0] != "my-custom" {
-		t.Error("Custom path not tracked")
-	}
-
-	// Remove default and check removed defaults tracking
-	m = NewManager(nil, []string{"CLAUDE.md/*"}, "/tmp/test", config.ScopeFull)
-	status = m.Status()
-	if len(status.RemovedDefaults) != 1 {
-		t.Errorf("Expected 1 removed default, got %d", len(status.RemovedDefaults))
+	// Editing after reset must not mutate the shared DefaultSyncPaths template
+	template := append([]string{}, config.DefaultSyncNames...)
+	m.Remove(m.SyncPaths()[0])
+	if !reflect.DeepEqual(config.DefaultSyncNames, template) {
+		t.Errorf("DefaultSyncNames template was mutated: %v", config.DefaultSyncNames)
 	}
 }
 
 func TestHasPath(t *testing.T) {
-	m := NewManager([]string{"a", "b"}, nil, "/tmp/test", config.ScopeFull)
+	m := NewManager([]string{"a", "b"}, nil, "/tmp/test")
 
 	if !m.HasPath("a") {
 		t.Error("Should have path 'a'")
@@ -240,7 +171,7 @@ func TestHasPath(t *testing.T) {
 }
 
 func TestHasExclude(t *testing.T) {
-	m := NewManager(nil, []string{"*.tmp", "cache/**"}, "/tmp/test", config.ScopeFull)
+	m := NewManager(nil, []string{"*.tmp", "cache/**"}, "/tmp/test")
 
 	if !m.HasExclude("*.tmp") {
 		t.Error("Should have exclude '*.tmp'")
@@ -257,63 +188,36 @@ func TestIntegrationWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Start fresh
-	m := NewManager(nil, nil, claudeDir, config.ScopeFull)
+	history := filepath.Join(claudeDir, "history.jsonl")
 
-	// 1. Remove a default path
-	result := m.Remove("history.jsonl")
-	if !result.Removed || !result.IsDefault {
-		t.Error("Should remove default")
-	}
-	if !m.HasExclude("history.jsonl") {
-		t.Error("Should add exclude for removed default")
+	// Start from what init writes
+	m := NewManager(config.DefaultSyncPaths(claudeDir), nil, claudeDir)
+
+	// 1. Remove a path
+	if result := m.Remove(history); !result.Removed {
+		t.Error("Should remove history.jsonl")
 	}
 
-	// Capture current state
-	currentPaths := append([]string{}, m.SyncPaths()...)
-	currentExcludes := append([]string{}, m.Excludes()...)
-
-	// 2. Simulate re-adding with the saved state (like after config reload)
-	// This simulates: user removed history.jsonl, config was saved with
-	// modified syncPaths (without history.jsonl) and excludes (with history.jsonl)
-	m = NewManager(currentPaths, currentExcludes, claudeDir, config.ScopeFull)
-
-	// Verify history.jsonl is NOT in sync paths but IS in excludes
-	if m.HasPath("history.jsonl") {
+	// 2. Reload from the saved lists (like after config reload)
+	m = NewManager(m.SyncPaths(), m.Excludes(), claudeDir)
+	if m.HasPath(history) {
 		t.Error("history.jsonl should not be in sync paths")
 	}
-	if !m.HasExclude("history.jsonl") {
-		t.Error("history.jsonl should be in excludes")
-	}
 
-	// 3. Add path back should work and remove the exclude
-	result2 := m.Add("history.jsonl")
-	if !result2.Added {
+	// 3. Add it back
+	if result := m.Add(history); !result.Added {
 		t.Error("Should add history.jsonl back")
 	}
-	if result2.ExcludesRemoved != 1 {
-		t.Errorf("Should remove 1 exclude, got %d", result2.ExcludesRemoved)
-	}
-	if m.HasExclude("history.jsonl") {
-		t.Error("history.jsonl exclude should be removed")
-	}
 
-	// 4. Add custom path
-	m.Add("my-notes")
-	status := m.Status()
-	if len(status.CustomPaths) != 1 {
-		t.Error("Should have 1 custom path")
-	}
-
-	// 5. Add sub-path filter
+	// 4. Add sub-path filter
 	m.AddExclude("plugins/**/node_modules/**")
 	if !m.HasExclude("plugins/**/node_modules/**") {
 		t.Error("Should have the exclude")
 	}
 
-	// 6. Reset clears everything
+	// 5. Reset restores the template and clears excludes
 	m.Reset()
-	if !m.HasPath("history.jsonl") {
+	if !m.HasPath(history) {
 		t.Error("Reset should restore defaults including history.jsonl")
 	}
 	if len(m.Excludes()) != 0 {

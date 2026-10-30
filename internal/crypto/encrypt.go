@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"filippo.io/age"
@@ -80,11 +81,7 @@ func GenerateKey(keyPath string) error {
 		return fmt.Errorf("failed to generate age key: %w", err)
 	}
 
-	if err := os.WriteFile(keyPath, []byte(identity.String()+"\n"), 0600); err != nil {
-		return fmt.Errorf("failed to write age key: %w", err)
-	}
-
-	return nil
+	return writeKeyFile(keyPath, identity.String())
 }
 
 // GenerateKeyFromPassphrase derives a deterministic encryption key from a passphrase.
@@ -115,10 +112,18 @@ func GenerateKeyFromPassphrase(keyPath, passphrase string) error {
 		return fmt.Errorf("failed to encode age identity: %w", err)
 	}
 
-	if err := os.WriteFile(keyPath, []byte(identityStr+"\n"), 0600); err != nil {
+	return writeKeyFile(keyPath, identityStr)
+}
+
+// writeKeyFile writes an age identity to keyPath, creating its parent
+// directory if needed (the path may come from $CLAUDE_SYNC_AGE_PATH).
+func writeKeyFile(keyPath, identity string) error {
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		return fmt.Errorf("failed to create key directory: %w", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(identity+"\n"), 0600); err != nil {
 		return fmt.Errorf("failed to write age key: %w", err)
 	}
-
 	return nil
 }
 

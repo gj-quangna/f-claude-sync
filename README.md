@@ -23,7 +23,7 @@
 - **Multi-provider storage**: Cloudflare R2, AWS S3, Google Cloud Storage, S3-compatible (Backblaze B2, MinIO, Wasabi), or WebDAV (Nextcloud, ownCloud)
 - **End-to-end encryption**: All files encrypted with age before upload
 - **Passphrase-based keys**: Same passphrase = same key on any device (no file copying)
-- **Selective sync**: Choose `--scope sessions` to sync only conversation data (skip plugins/node_modules)
+- **Selective sync**: `sync_paths` and `exclude` globs in `config.yaml` decide exactly what is synced
 - **Interactive wizard**: Arrow-key driven setup with validation
 - **Secure self-updating**: `claude-sync update` downloads and verifies SHA256 checksums
 - **Simple CLI**: `push`, `pull`, `status`, `diff`, `conflicts` commands
@@ -181,6 +181,8 @@ claude-sync pull
 
 ## What Gets Synced
 
+Exactly the paths listed under `sync_paths` in `config.yaml` (absolute paths inside `~/.claude`). `init` writes this default list:
+
 | Path | Content |
 |------|---------|
 | `~/.claude/projects/` | Session files, auto-memory |
@@ -195,20 +197,27 @@ claude-sync pull
 | `~/.claude/settings.local.json` | Local settings |
 | `~/.claude/CLAUDE.md` | Global instructions |
 
-### Sync scope
+### Sync settings (config.yaml)
 
-`init` asks whether to sync everything or just conversation data; you can also set it with `--scope`:
+Everything that controls *what* gets synced lives in `config.yaml` (`$CLAUDE_SYNC_CONFIG_PATH`). `init` writes all three keys; edit the file directly or use `claude-sync paths …` / `claude-sync mcp enable|disable`.
 
-| Scope | Syncs | Use when |
-|-------|-------|----------|
-| `full` (default) | everything in the table above | you want settings, skills, agents, and plugins mirrored too |
-| `sessions` | `projects/`, `history.jsonl`, `tasks/`, `plans/` only | you just want `claude --resume` to work across machines |
-
-```bash
-claude-sync init --scope sessions
+```yaml
+sync_paths:            # absolute paths inside ~/.claude — required, no built-in fallback
+  - /home/alice/.claude/projects
+  - /home/alice/.claude/history.jsonl
+  - /home/alice/.claude/plugins
+exclude:               # doublestar globs: relative ones match anywhere under ~/.claude,
+  - "**/node_modules/**"                           # absolute ones only at that location
+  - "/home/alice/.claude/plugins/**/.venv/**"
+mcp_sync:
+  enabled: true                    # default when the block is missing
+  path: /home/alice/.claude.json   # absolute path to the .claude.json holding mcpServers
 ```
 
-**Why `sessions` exists:** `full` includes `plugins/`, whose plugin caches bundle `node_modules` and Python `.venv` trees — thousands of large, machine-/arch-specific files that are regenerated on demand and should not be synced. `sessions` skips them, keeping syncs small, fast, and portable. The scope is saved in `~/.claude-sync/config.yaml` and applies to every `push`/`pull`.
+- `sync_paths` entries must be absolute and inside `~/.claude`; relative entries, `~`, or paths outside it make `push`/`pull`/`status`/`diff` refuse to run, as does an empty list (it would look like "every file was deleted" and wipe the remote). `claude-sync paths reset` restores the default list.
+- Remote keys stay relative to `~/.claude`, so devices with different home directories still share the same remote files — but each device needs its own absolute paths in `config.yaml`.
+- A missing `mcp_sync` block means enabled with `~/.claude.json`; `mcp_sync.path` must be absolute.
+- `plugins/` bundles `node_modules` and `.venv` trees — exclude them (as above) or drop `plugins` from `sync_paths`.
 
 ## Cross-Device Path Mapping
 
@@ -239,6 +248,24 @@ Synced verbatim, those would be **different projects** and `claude --resume` on 
   Sessions under either directory sync to the shared `${WORK}` namespace and resume correctly on both machines.
 
 **Upgrading from an older version?** Run `claude-sync migrate` once on each device to convert existing remote data to portable keys. Paths the current device doesn't own are left for the other device's migrate run.
+
+## File Locations (required)
+
+claude-sync has **no default location** for its own files. All three environment variables must be set, otherwise every command (except `update`, `changelog`, `help`) exits with an error listing the missing ones. A leading `~` is expanded.
+
+| Variable | File |
+|----------|------|
+| `CLAUDE_SYNC_CONFIG_PATH` | Config (storage credentials, sync_paths, exclude, mcp_sync) |
+| `CLAUDE_SYNC_AGE_PATH` | Encryption key |
+| `CLAUDE_SYNC_STATE_PATH` | Local sync state |
+
+```bash
+export CLAUDE_SYNC_CONFIG_PATH=~/.config/claude-sync/config.yaml
+export CLAUDE_SYNC_AGE_PATH=~/.config/claude-sync/age-key.txt
+export CLAUDE_SYNC_STATE_PATH=~/.local/state/claude-sync/state.json
+```
+
+Missing parent directories are created on first write. The key location comes only from `CLAUDE_SYNC_AGE_PATH`; an `encryption_key_path` left in an old config file is ignored. `claude-sync reset` removes the config and key files (plus state with `--local`) individually and never deletes the directories that contain them.
 
 ## Commands
 
@@ -312,7 +339,7 @@ claude-sync changelog --limit 5  # Show last 5 releases
 
 ## Exclude Patterns
 
-Skip specific files or directories during sync by adding exclude patterns to your config (`~/.claude-sync/config.yaml`):
+Skip specific files or directories during sync by adding exclude patterns to `config.yaml` (`$CLAUDE_SYNC_CONFIG_PATH`):
 
 ```yaml
 exclude:

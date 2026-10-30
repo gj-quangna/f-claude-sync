@@ -52,10 +52,23 @@ const (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:     "claude-sync",
-		Short:   "Sync Claude Code sessions across devices",
-		Long:    `A CLI tool to sync your ~/.claude directory across devices using cloud storage with encryption.`,
+		Use:   "claude-sync",
+		Short: "Sync Claude Code sessions across devices",
+		Long: `A CLI tool to sync your ~/.claude directory across devices using cloud storage with encryption.
+
+claude-sync has no default location for its own files. Export all three:
+  ` + config.EnvConfigPath + `   config.yaml (storage credentials, sync_paths, exclude, mcp_sync)
+  ` + config.EnvAgePath + `      age-key.txt (encryption key)
+  ` + config.EnvStatePath + `    state.json (local sync state)`,
 		Version: version,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Commands that never touch config, key or state run without the env vars
+			switch cmd.Name() {
+			case "update", "changelog", "help", "completion":
+				return nil
+			}
+			return config.CheckEnv()
+		},
 	}
 
 	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress output")
@@ -120,7 +133,6 @@ func printWarning(text string) {
 
 func initCmd() *cobra.Command {
 	var provider, bucket string
-	var scope string
 	var usePassphrase, force bool
 
 	// R2 flags
@@ -161,7 +173,10 @@ Examples:
 			printBanner()
 
 			ctx := context.Background()
-			keyPath := config.AgeKeyFilePath()
+			keyPath, err := config.AgeKeyFilePath()
+			if err != nil {
+				return err
+			}
 
 			// Special case: --passphrase with existing config = just regenerate key
 			if usePassphrase && config.Exists() && !force {
@@ -169,13 +184,12 @@ Examples:
 			}
 
 			// Normal flow: full setup
-			return initFullSetup(ctx, keyPath, provider, bucket, accountID, accessKey, secretKey, s3Region, s3Endpoint, s3UsePathStyle, gcsProjectID, gcsCredentialsFile, webdavURL, webdavUsername, webdavPassword, webdavPathPrefix, scope, usePassphrase, force)
+			return initFullSetup(ctx, keyPath, provider, bucket, accountID, accessKey, secretKey, s3Region, s3Endpoint, s3UsePathStyle, gcsProjectID, gcsCredentialsFile, webdavURL, webdavUsername, webdavPassword, webdavPathPrefix, usePassphrase, force)
 		},
 	}
 
 	// Provider selection
 	cmd.Flags().StringVar(&provider, "provider", "", "Storage provider: r2, s3, gcs, s3-compatible, or webdav")
-	cmd.Flags().StringVar(&scope, "scope", "", "Sync scope: 'full' (default, everything) or 'sessions' (conversation history only)")
 	cmd.Flags().StringVar(&bucket, "bucket", "", "Bucket name")
 	cmd.Flags().BoolVar(&usePassphrase, "passphrase", false, "Derive encryption key from passphrase")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Overwrite existing config/key without prompting")
@@ -246,36 +260,8 @@ func initPassphraseOnly(ctx context.Context, keyPath string) error {
 	return nil
 }
 
-// resolveScope validates a --scope value, prompting interactively when empty.
-// Returns "full" or "sessions". "sessions" syncs only portable conversation
-// data; "full" syncs everything (the historical default).
-func resolveScope(scope string) (string, error) {
-	switch scope {
-	case config.ScopeFull, config.ScopeSessions:
-		return scope, nil
-	case "":
-		prompt := &survey.Select{
-			Message: "What should be synced?",
-			Options: []string{
-				"Sessions only — conversation history (recommended for syncing across machines)",
-				"Everything — settings, plugins, skills, agents, and sessions",
-			},
-		}
-		var c int
-		if err := survey.AskOne(prompt, &c); err != nil {
-			return "", err
-		}
-		if c == 0 {
-			return config.ScopeSessions, nil
-		}
-		return config.ScopeFull, nil
-	default:
-		return "", fmt.Errorf("invalid --scope %q (use \"full\" or \"sessions\")", scope)
-	}
-}
-
 // initFullSetup handles the full init wizard
-func initFullSetup(ctx context.Context, keyPath, provider, bucket, accountID, accessKey, secretKey, s3Region, s3Endpoint string, s3UsePathStyle bool, gcsProjectID, gcsCredentialsFile, webdavURL, webdavUsername, webdavPassword, webdavPathPrefix, scope string, usePassphrase, force bool) error {
+func initFullSetup(ctx context.Context, keyPath, provider, bucket, accountID, accessKey, secretKey, s3Region, s3Endpoint string, s3UsePathStyle bool, gcsProjectID, gcsCredentialsFile, webdavURL, webdavUsername, webdavPassword, webdavPathPrefix string, usePassphrase, force bool) error {
 	if config.Exists() && !force {
 		var overwrite bool
 		prompt := &survey.Confirm{
@@ -354,9 +340,8 @@ func initFullSetup(ctx context.Context, keyPath, provider, bucket, accountID, ac
 	printInfo("Files are encrypted with 'age' before upload.")
 	fmt.Println()
 
-	configDir := config.ConfigDirPath()
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		return fmt.Errorf("failed to create key directory: %w", err)
 	}
 
 	// Check if we should use passphrase mode
@@ -469,19 +454,19 @@ skipKeyGen:
 		printSuccess("Encryption key verified")
 	}
 
-	// Resolve sync scope (prompts if not provided via --scope)
-	scope, err = resolveScope(scope)
-	if err != nil {
-		return err
-	}
-
-	// Save config
+	// Save config. A re-init keeps the user's sync settings; a fresh one
+	// writes the defaults so every setting is visible in config.yaml.
 	cfg := &config.Config{
-		Storage:       storageCfg,
-		EncryptionKey: "~/.claude-sync/age-key.txt",
+		Storage:   storageCfg,
+		SyncPaths: config.DefaultSyncPaths(config.ClaudeDir()),
+		Exclude:   []string{},
+		MCPSync:   &config.MCPSyncConfig{Enabled: true, Path: config.ClaudeJSONPath()},
 	}
-	if scope == config.ScopeSessions {
-		cfg.Scope = config.ScopeSessions
+	if existing, err := config.Load(); err == nil {
+		cfg.SyncPaths = existing.SyncPaths
+		cfg.Exclude = existing.Exclude
+		cfg.MCPSync = existing.MCPSync
+		cfg.PathMap = existing.PathMap
 	}
 
 	if err := config.Save(cfg); err != nil {
@@ -1710,6 +1695,33 @@ func showDiff(localPath, conflictPath string) {
 	fmt.Println()
 }
 
+// removeLocalFiles deletes the config file and age key (plus the state file when
+// withState is set) and returns the paths that were actually removed. Files are
+// removed one by one because $CLAUDE_SYNC_*_PATH may point into directories
+// that hold unrelated files.
+func removeLocalFiles(withState bool) ([]string, error) {
+	getters := []func() (string, error){config.ConfigFilePath, config.AgeKeyFilePath}
+	if withState {
+		getters = append(getters, config.StateFilePath)
+	}
+
+	var removed []string
+	for _, get := range getters {
+		p, err := get()
+		if err != nil {
+			return removed, err
+		}
+		if err := os.Remove(p); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return removed, fmt.Errorf("failed to remove %s: %w", p, err)
+		}
+		removed = append(removed, p)
+	}
+	return removed, nil
+}
+
 func resetCmd() *cobra.Command {
 	var clearRemote, clearLocal, force bool
 
@@ -1783,22 +1795,14 @@ Examples:
 				}
 			}
 
-			// Clear local state if requested
-			if clearLocal {
-				statePath := config.StateFilePath()
-				if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
-					printWarning("Could not remove state file: " + err.Error())
-				} else {
-					printSuccess("Cleared local sync state")
-				}
+			// Config and key are always removed; state only with --local
+			removed, err := removeLocalFiles(clearLocal)
+			for _, p := range removed {
+				printSuccess("Removed " + p)
 			}
-
-			// Always clear config and key
-			configDir := config.ConfigDirPath()
-			if err := os.RemoveAll(configDir); err != nil {
-				return fmt.Errorf("failed to remove config directory: %w", err)
+			if err != nil {
+				return err
 			}
-			printSuccess("Removed " + configDir)
 
 			fmt.Println()
 			printSuccess("Reset complete!")
@@ -2293,7 +2297,11 @@ func hasExistingClaudeFiles(cfg *config.Config) (bool, error) {
 		return false, nil
 	}
 
-	files, err := sync.GetLocalFiles(claudeDir, cfg.GetEffectiveSyncPaths())
+	syncPaths, err := cfg.RelSyncPaths(claudeDir)
+	if err != nil {
+		return false, err
+	}
+	files, err := sync.GetLocalFiles(claudeDir, syncPaths)
 	if err != nil {
 		return false, err
 	}
@@ -2780,7 +2788,8 @@ func mcpStatusCmd() *cobra.Command {
 			}
 
 			if status.ServerCount == 0 {
-				fmt.Printf("  Servers    %s0 servers%s in %s\n", colorDim, colorReset, config.ClaudeJSONPath())
+				mcpPath, _ := cfg.MCPConfigPath()
+				fmt.Printf("  Servers    %s0 servers%s in %s\n", colorDim, colorReset, mcpPath)
 			} else {
 				fmt.Printf("  Servers    %d configured\n", status.ServerCount)
 			}
@@ -2868,7 +2877,8 @@ func mcpListCmd() *cobra.Command {
 			}
 
 			if status.ServerCount == 0 {
-				fmt.Printf("%s⋯%s No MCP servers found in %s\n", colorDim, colorReset, config.ClaudeJSONPath())
+				mcpPath, _ := cfg.MCPConfigPath()
+				fmt.Printf("%s⋯%s No MCP servers found in %s\n", colorDim, colorReset, mcpPath)
 				return nil
 			}
 
@@ -3151,9 +3161,12 @@ func pathsCmd() *cobra.Command {
 		Short: "Manage sync paths and exclude filters",
 		Long: `Control which paths under ~/.claude/ are synced.
 
-Effective sync = sync_list − exclude_list
+Both lists live in config.yaml ($CLAUDE_SYNC_CONFIG_PATH) and can be edited
+there directly; these commands are shortcuts that rewrite the file.
 
-Use 'paths add' to include a path, 'paths remove' to exclude it.
+Effective sync = sync_paths − exclude
+
+Use 'paths add' / 'paths remove' to edit sync_paths.
 Use 'paths exclude' for sub-path glob filters (e.g., skip node_modules inside plugins/).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPathsList()
@@ -3186,68 +3199,41 @@ func runPathsList() error {
 	if err != nil {
 		return err
 	}
+	configPath, _ := config.ConfigFilePath()
 
-	mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir(), cfg.Scope)
-	status := mgr.Status()
-
-	source := "default"
-	if status.IsCustomized {
-		source = "config.yaml"
+	fmt.Printf("\n%sSync Paths%s (%s):\n", colorBold, colorReset, configPath)
+	if len(cfg.SyncPaths) == 0 {
+		fmt.Printf("  %s!%s none — push/pull refuse to run until sync_paths has entries\n", colorYellow, colorReset)
+	}
+	for _, p := range cfg.SyncPaths {
+		fmt.Printf("  %s+%s %s\n", colorGreen, colorReset, p)
 	}
 
-	scopeLabel := cfg.Scope
-	if scopeLabel == "" {
-		scopeLabel = config.ScopeFull
-	}
-
-	// List what actually syncs, not the raw config list. Under sessions scope
-	// the effective set is the intersection with SessionSyncPaths, so showing
-	// cfg.SyncPaths verbatim would advertise paths that are never uploaded.
-	effective := make(map[string]struct{})
-	for _, p := range cfg.GetEffectiveSyncPaths() {
-		effective[p] = struct{}{}
-	}
-
-	var outOfScope []string
-
-	fmt.Printf("\n%sSync Paths%s (%s, scope: %s):\n", colorBold, colorReset, source, scopeLabel)
-	for _, p := range status.SyncPaths {
-		if _, ok := effective[p]; !ok {
-			outOfScope = append(outOfScope, p)
-			continue
-		}
-		marker := colorGreen + "+" + colorReset
-		if !mgr.IsDefault(p) {
-			marker = colorCyan + "+" + colorReset + " (custom)"
-		}
-		fmt.Printf("  %s %s\n", marker, p)
-	}
-
-	if len(outOfScope) > 0 {
-		fmt.Printf("\n%sNot synced%s (outside the %q scope):\n", colorBold, colorReset, scopeLabel)
-		for _, p := range outOfScope {
-			fmt.Printf("  %s-%s %s\n", colorYellow, colorReset, p)
-		}
-		fmt.Printf("\n  These remain in config.yaml and apply again if scope is set to %q.\n",
-			config.ScopeFull)
-	}
-
-	if len(status.Excludes) > 0 {
+	if len(cfg.Exclude) > 0 {
 		fmt.Printf("\n%sExclude Filters%s:\n", colorBold, colorReset)
-		for _, e := range status.Excludes {
+		for _, e := range cfg.Exclude {
 			fmt.Printf("  %s-%s %s\n", colorYellow, colorReset, e)
 		}
 	}
 
-	fmt.Println()
+	mcp := "enabled"
+	if !cfg.IsMCPSyncEnabled() {
+		mcp = "disabled"
+	}
+	mcpPath, err := cfg.MCPConfigPath()
+	if err != nil {
+		mcpPath = err.Error()
+	}
+	fmt.Printf("\n%sMCP sync%s: %s (%s)\n\n", colorBold, colorReset, mcp, mcpPath)
 	return nil
 }
 
 func pathsAddCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "add <path>",
+		Use:   "add <absolute path>",
 		Short: "Add a path to sync",
-		Long: `Add a relative path under ~/.claude/ to the sync list.
+		Long: `Add an absolute path inside ~/.claude/ to sync_paths, e.g.
+  claude-sync paths add ~/.claude/todos      (the shell expands ~)
 
 If the path was previously removed (and has an exclude), the
 conflicting exclude is automatically removed.`,
@@ -3258,19 +3244,11 @@ conflicting exclude is automatically removed.`,
 				return err
 			}
 
-			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir(), cfg.Scope)
+			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir())
 			result := mgr.Add(args[0])
 
 			if result.Invalid != nil {
 				return fmt.Errorf("invalid sync path: %w", result.Invalid)
-			}
-
-			if result.OutOfScope {
-				fmt.Printf("%s!%s %s is outside the %q scope and would not be synced\n",
-					colorYellow, colorReset, args[0], config.ScopeSessions)
-				fmt.Printf("  Set %sscope: full%s in %s to sync paths beyond session data.\n",
-					colorCyan, colorReset, config.ConfigFilePath())
-				return nil
 			}
 
 			if result.AlreadyExists {
@@ -3300,20 +3278,17 @@ conflicting exclude is automatically removed.`,
 func pathsRemoveCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "remove <path>",
+		Use:   "remove <absolute path>",
 		Short: "Remove a path from sync",
-		Long: `Remove a path from the sync list.
-
-Default paths are also added to excludes so they stay off after reset.
-Custom paths are simply removed from the list.`,
-		Args: cobra.ExactArgs(1),
+		Long:  `Remove a path from sync_paths in config.yaml.`,
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
 				return err
 			}
 
-			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir(), cfg.Scope)
+			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir())
 
 			if !mgr.HasPath(args[0]) {
 				fmt.Printf("%s!%s %s is not in the sync list\n", colorYellow, colorReset, args[0])
@@ -3332,16 +3307,15 @@ Custom paths are simply removed from the list.`,
 				}
 			}
 
-			result := mgr.Remove(args[0])
+			mgr.Remove(args[0])
 			cfg.SyncPaths = mgr.SyncPaths()
-			cfg.Exclude = mgr.Excludes()
 			if err := config.Save(cfg); err != nil {
 				return err
 			}
 
 			fmt.Printf("%s✓%s Removed %s from sync\n", colorGreen, colorReset, args[0])
-			if result.ExcludeAdded != "" {
-				fmt.Printf("%s✓%s Added exclude %s (survives reset)\n", colorGreen, colorReset, result.ExcludeAdded)
+			if len(cfg.SyncPaths) == 0 {
+				printWarning("sync_paths is now empty — push/pull will refuse to run until you add a path")
 			}
 			return nil
 		},
@@ -3359,7 +3333,9 @@ func pathsExcludeCmd() *cobra.Command {
 Use for filtering within a sync path (e.g., skip node_modules).
 To stop syncing a whole path, use 'paths remove' instead.
 
-Glob syntax: dir/*, dir/**, **/*.ext`,
+Glob syntax: dir/*, dir/**, **/*.ext. Relative patterns are matched against
+paths under ~/.claude; an absolute pattern (e.g. ~/.claude/plugins/**/node_modules/**)
+matches that location only.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -3367,7 +3343,7 @@ Glob syntax: dir/*, dir/**, **/*.ext`,
 				return err
 			}
 
-			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir(), cfg.Scope)
+			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir())
 			result := mgr.AddExclude(args[0])
 
 			if result.IsSyncPath {
@@ -3403,7 +3379,7 @@ func pathsUnexcludeCmd() *cobra.Command {
 				return err
 			}
 
-			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir(), cfg.Scope)
+			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir())
 			result := mgr.RemoveExclude(args[0])
 
 			if result.NotFound {
@@ -3426,7 +3402,7 @@ func pathsResetCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "reset",
-		Short: "Restore default sync paths and clear excludes",
+		Short: "Write the default sync_paths to config.yaml and clear excludes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !force {
 				var confirm bool
@@ -3445,8 +3421,10 @@ func pathsResetCmd() *cobra.Command {
 				return err
 			}
 
-			cfg.SyncPaths = nil
-			cfg.Exclude = nil
+			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir())
+			mgr.Reset()
+			cfg.SyncPaths = mgr.SyncPaths()
+			cfg.Exclude = []string{}
 			if err := config.Save(cfg); err != nil {
 				return err
 			}

@@ -39,7 +39,16 @@ type SyncState struct {
 }
 
 func LoadState() (*SyncState, error) {
-	return loadStateFromPath(config.StateFilePath())
+	statePath, err := config.StateFilePath()
+	if err != nil {
+		return nil, err
+	}
+	state, err := loadStateFromPath(statePath)
+	if err != nil {
+		return nil, err
+	}
+	state.savePath = statePath
+	return state, nil
 }
 
 // LoadStateFromDir loads state from a custom directory (for testing)
@@ -94,7 +103,10 @@ func NewState() *SyncState {
 func (s *SyncState) Save() error {
 	statePath := s.savePath
 	if statePath == "" {
-		statePath = config.StateFilePath()
+		var err error
+		if statePath, err = config.StateFilePath(); err != nil {
+			return err
+		}
 	}
 
 	// Ensure directory exists

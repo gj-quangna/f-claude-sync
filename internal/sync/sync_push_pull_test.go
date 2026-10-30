@@ -161,7 +161,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		state:     state,
 		claudeDir: claudeDir,
 		quiet:     true,
-		cfg:       &config.Config{},
+		cfg:       &config.Config{SyncPaths: config.DefaultSyncPaths(claudeDir)},
 	}
 
 	return &testEnv{
@@ -472,7 +472,7 @@ func TestPushThenPullRoundTrip(t *testing.T) {
 		state:     stateA,
 		claudeDir: deviceADir,
 		quiet:     true,
-		cfg:       &config.Config{},
+		cfg:       &config.Config{SyncPaths: config.DefaultSyncPaths(deviceADir)},
 	}
 
 	// Device A creates files and pushes
@@ -506,7 +506,7 @@ func TestPushThenPullRoundTrip(t *testing.T) {
 		state:     stateB,
 		claudeDir: deviceBDir,
 		quiet:     true,
-		cfg:       &config.Config{},
+		cfg:       &config.Config{SyncPaths: config.DefaultSyncPaths(deviceBDir)},
 	}
 
 	// Device B pulls

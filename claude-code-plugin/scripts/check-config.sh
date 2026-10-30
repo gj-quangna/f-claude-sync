@@ -1,13 +1,22 @@
 #!/bin/bash
 # Check if claude-sync is configured and return status as additionalContext
 
-CONFIG_FILE="$HOME/.claude-sync/config.yaml"
-KEY_FILE="$HOME/.claude-sync/age-key.txt"
-
 if ! command -v claude-sync &> /dev/null; then
     echo "claude-sync is not installed. Install with: npm install -g @tawandotorg/claude-sync"
     exit 0
 fi
+
+MISSING=""
+for VAR in CLAUDE_SYNC_CONFIG_PATH CLAUDE_SYNC_AGE_PATH CLAUDE_SYNC_STATE_PATH; do
+    [ -z "${!VAR}" ] && MISSING="$MISSING $VAR"
+done
+if [ -n "$MISSING" ]; then
+    echo "claude-sync: required environment variable(s) not set:$MISSING. Export them (paths to config.yaml, age-key.txt, state.json) before using claude-sync."
+    exit 0
+fi
+
+CONFIG_FILE="${CLAUDE_SYNC_CONFIG_PATH/#\~/$HOME}"
+KEY_FILE="${CLAUDE_SYNC_AGE_PATH/#\~/$HOME}"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "claude-sync is not configured. Run /sync-init to set up cross-device sync."

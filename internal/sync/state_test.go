@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tawanorg/claude-sync/internal/config"
 )
 
 func TestNewState(t *testing.T) {
@@ -616,5 +618,32 @@ func TestGetLocalFilesSkipsSymlinksInDirectories(t *testing.T) {
 	// Symlink inside directory walk should be skipped
 	if _, ok := localFiles["subdir/symlink.txt"]; ok {
 		t.Error("Symlink in subdir should be skipped during directory walk")
+	}
+}
+
+func TestLoadStateUsesEnvPath(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "nested", "state.json")
+	t.Setenv(config.EnvStatePath, statePath)
+
+	state, err := LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		t.Errorf("state not written to $%s: %v", config.EnvStatePath, err)
+	}
+}
+
+func TestLoadStateRequiresEnv(t *testing.T) {
+	t.Setenv(config.EnvStatePath, "")
+
+	if _, err := LoadState(); err == nil || !strings.Contains(err.Error(), config.EnvStatePath) {
+		t.Errorf("LoadState err = %v, want mention of %s", err, config.EnvStatePath)
+	}
+	if err := NewState().Save(); err == nil {
+		t.Error("Save without a path should fail when $CLAUDE_SYNC_STATE_PATH is unset")
 	}
 }

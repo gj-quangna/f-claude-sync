@@ -278,18 +278,6 @@ func TestSyncStateDetectsAllChangeTypes(t *testing.T) {
 // TestConfigPaths verifies config path functions
 func TestConfigPaths(t *testing.T) {
 	// These should return non-empty paths
-	if config.ConfigDirPath() == "" {
-		t.Error("ConfigDirPath should not be empty")
-	}
-	if config.ConfigFilePath() == "" {
-		t.Error("ConfigFilePath should not be empty")
-	}
-	if config.StateFilePath() == "" {
-		t.Error("StateFilePath should not be empty")
-	}
-	if config.AgeKeyFilePath() == "" {
-		t.Error("AgeKeyFilePath should not be empty")
-	}
 	if config.ClaudeDir() == "" {
 		t.Error("ClaudeDir should not be empty")
 	}
@@ -297,19 +285,19 @@ func TestConfigPaths(t *testing.T) {
 
 // TestSyncPathsConfig verifies sync paths are properly configured
 func TestSyncPathsConfig(t *testing.T) {
-	// Verify expected paths are in SyncPaths
+	// Verify expected paths are in DefaultSyncPaths
 	expectedPaths := []string{"CLAUDE.md", "settings.json", "agents", "skills", "plugins"}
 
 	for _, expected := range expectedPaths {
 		found := false
-		for _, path := range config.SyncPaths {
+		for _, path := range config.DefaultSyncNames {
 			if path == expected {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("Expected '%s' in SyncPaths", expected)
+			t.Errorf("Expected '%s' in DefaultSyncPaths", expected)
 		}
 	}
 }

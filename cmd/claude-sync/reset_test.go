@@ -3,113 +3,104 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/tawanorg/claude-sync/internal/config"
 )
 
-func TestResetClearsConfigDir(t *testing.T) {
-	// Create temp home directory
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	// Create mock config directory
-	configDir := filepath.Join(tmpDir, ".claude-sync")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("Failed to create config dir: %v", err)
+// setupLocalFiles points the CLAUDE_SYNC_*_PATH variables at files inside a
+// shared directory that also holds an unrelated file, and creates all of them.
+func setupLocalFiles(t *testing.T) (dir string, files map[string]string) {
+	t.Helper()
+	dir = t.TempDir()
+	files = map[string]string{
+		config.EnvConfigPath: filepath.Join(dir, "config.yaml"),
+		config.EnvAgePath:    filepath.Join(dir, "age-key.txt"),
+		config.EnvStatePath:  filepath.Join(dir, "state.json"),
+		"unrelated":          filepath.Join(dir, "unrelated.txt"),
 	}
-
-	// Create mock files
-	files := []string{"config.yaml", "age-key.txt", "state.json"}
-	for _, f := range files {
-		path := filepath.Join(configDir, f)
-		if err := os.WriteFile(path, []byte("test"), 0600); err != nil {
-			t.Fatalf("Failed to create %s: %v", f, err)
+	for name, p := range files {
+		if name != "unrelated" {
+			t.Setenv(name, p)
+		}
+		if err := os.WriteFile(p, []byte("test"), 0600); err != nil {
+			t.Fatal(err)
 		}
 	}
+	return dir, files
+}
 
-	// Verify files exist
-	for _, f := range files {
-		path := filepath.Join(configDir, f)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			t.Fatalf("File should exist before reset: %s", f)
-		}
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+func TestRemoveLocalFilesKeepsStateByDefault(t *testing.T) {
+	_, files := setupLocalFiles(t)
+
+	removed, err := removeLocalFiles(false)
+	if err != nil {
+		t.Fatalf("removeLocalFiles: %v", err)
 	}
-
-	// Remove config dir (simulating reset)
-	if err := os.RemoveAll(configDir); err != nil {
-		t.Fatalf("Failed to remove config dir: %v", err)
+	if len(removed) != 2 {
+		t.Errorf("removed %v, want config and key only", removed)
 	}
-
-	// Verify directory is gone
-	if _, err := os.Stat(configDir); !os.IsNotExist(err) {
-		t.Error("Config directory should not exist after reset")
+	if exists(files[config.EnvConfigPath]) || exists(files[config.EnvAgePath]) {
+		t.Error("config and key should be removed")
+	}
+	if !exists(files[config.EnvStatePath]) {
+		t.Error("state should be kept without --local")
+	}
+	if !exists(files["unrelated"]) {
+		t.Error("unrelated file in the same directory must be kept")
 	}
 }
 
-func TestResetClearsStateFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+func TestRemoveLocalFilesWithState(t *testing.T) {
+	dir, files := setupLocalFiles(t)
 
-	// Create config dir and state file
-	configDir := filepath.Join(tmpDir, ".claude-sync")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("Failed to create config dir: %v", err)
+	removed, err := removeLocalFiles(true)
+	if err != nil {
+		t.Fatalf("removeLocalFiles: %v", err)
 	}
-
-	statePath := filepath.Join(configDir, "state.json")
-	stateContent := `{"files": {}, "device_id": "test"}`
-	if err := os.WriteFile(statePath, []byte(stateContent), 0600); err != nil {
-		t.Fatalf("Failed to create state file: %v", err)
+	if len(removed) != 3 {
+		t.Errorf("removed %v, want config, key and state", removed)
 	}
-
-	// Verify state exists
-	if _, err := os.Stat(statePath); os.IsNotExist(err) {
-		t.Fatal("State file should exist before reset")
+	if exists(files[config.EnvStatePath]) {
+		t.Error("state should be removed with --local")
 	}
-
-	// Remove state file (simulating reset --local)
-	if err := os.Remove(statePath); err != nil {
-		t.Fatalf("Failed to remove state file: %v", err)
-	}
-
-	// Verify state is gone
-	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
-		t.Error("State file should not exist after reset --local")
+	if !exists(dir) || !exists(files["unrelated"]) {
+		t.Error("containing directory and unrelated files must be kept")
 	}
 }
 
-func TestResetPreservesClaudeDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	// Create both directories
-	configDir := filepath.Join(tmpDir, ".claude-sync")
-	claudeDir := filepath.Join(tmpDir, ".claude")
-
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("Failed to create config dir: %v", err)
-	}
-	if err := os.MkdirAll(claudeDir, 0755); err != nil {
-		t.Fatalf("Failed to create claude dir: %v", err)
+func TestRemoveLocalFilesSkipsMissing(t *testing.T) {
+	_, files := setupLocalFiles(t)
+	if err := os.Remove(files[config.EnvAgePath]); err != nil {
+		t.Fatal(err)
 	}
 
-	// Create a session file in claude dir
-	sessionFile := filepath.Join(claudeDir, "session.jsonl")
-	if err := os.WriteFile(sessionFile, []byte("session data"), 0644); err != nil {
-		t.Fatalf("Failed to create session file: %v", err)
+	removed, err := removeLocalFiles(true)
+	if err != nil {
+		t.Fatalf("removeLocalFiles: %v", err)
 	}
-
-	// Remove only config dir (reset should not touch .claude)
-	if err := os.RemoveAll(configDir); err != nil {
-		t.Fatalf("Failed to remove config dir: %v", err)
+	for _, p := range removed {
+		if p == files[config.EnvAgePath] {
+			t.Errorf("missing file reported as removed: %s", p)
+		}
 	}
-
-	// Verify .claude is still there
-	if _, err := os.Stat(claudeDir); os.IsNotExist(err) {
-		t.Error(".claude directory should be preserved after reset")
+	if len(removed) != 2 {
+		t.Errorf("removed %v, want 2 entries", removed)
 	}
+}
 
-	// Verify session file is still there
-	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
-		t.Error("Session file should be preserved after reset")
+func TestRemoveLocalFilesRequiresEnv(t *testing.T) {
+	setupLocalFiles(t)
+	t.Setenv(config.EnvAgePath, "")
+
+	_, err := removeLocalFiles(false)
+	if err == nil || !strings.Contains(err.Error(), config.EnvAgePath) {
+		t.Errorf("err = %v, want mention of %s", err, config.EnvAgePath)
 	}
 }

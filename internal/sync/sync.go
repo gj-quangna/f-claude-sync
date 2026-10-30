@@ -75,6 +75,10 @@ type ProgressEvent struct {
 type ProgressFunc func(event ProgressEvent)
 
 func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
+	if err := cfg.RequireSyncPaths(); err != nil {
+		return nil, err
+	}
+
 	storageCfg := cfg.GetStorageConfig()
 	store, err := storage.New(storageCfg)
 	if err != nil {
@@ -146,24 +150,18 @@ func (s *Syncer) progress(event ProgressEvent) {
 }
 
 func (s *Syncer) isExcluded(relPath string) bool {
-	return s.cfg.IsExcluded(relPath)
+	return s.cfg.IsExcludedUnder(s.claudeDir, relPath)
 }
 
-// syncPaths returns the set of ~/.claude paths to sync, honoring both the
-// configured scope ("full" by default, or "sessions" for portable data only)
-// and any sync_paths override, with scope acting as a ceiling.
+// syncPaths returns sync_paths from config.yaml relative to the claude dir.
+// NewSyncer has already validated them, so an error cannot occur there.
 func (s *Syncer) syncPaths() []string {
-	return s.cfg.GetEffectiveSyncPaths()
+	rel, _ := s.cfg.RelSyncPaths(s.claudeDir)
+	return rel
 }
 
-// Scope returns the configured sync scope (empty means the default "full").
-func (s *Syncer) Scope() string {
-	return s.cfg.Scope
-}
-
-// SyncPaths returns the effective ~/.claude paths this syncer operates on, so
-// callers such as the pre-pull backup cover exactly the set that pull can
-// overwrite rather than recomputing it from scope alone.
+// SyncPaths returns the ~/.claude paths this syncer operates on, so callers
+// such as the pre-pull backup cover exactly the set that pull can overwrite.
 func (s *Syncer) SyncPaths() []string {
 	return s.syncPaths()
 }
@@ -861,18 +859,21 @@ func (s *Syncer) Diff(ctx context.Context) ([]DiffEntry, error) {
 }
 
 // claudeJSONPath returns the path to ~/.claude.json, respecting test overrides.
-func (s *Syncer) claudeJSONPath() string {
+func (s *Syncer) claudeJSONPath() (string, error) {
 	if s.cfg.ClaudeJSONOverride != "" {
-		return s.cfg.ClaudeJSONOverride
+		return s.cfg.ClaudeJSONOverride, nil
 	}
-	return config.ClaudeJSONPath()
+	return s.cfg.MCPConfigPath()
 }
 
 // PushMCP reads local MCP server configs, normalizes paths, and uploads them.
 func (s *Syncer) PushMCP(ctx context.Context) (*MCPPushResult, error) {
 	result := &MCPPushResult{}
 
-	claudeJSON := s.claudeJSONPath()
+	claudeJSON, err := s.claudeJSONPath()
+	if err != nil {
+		return nil, err
+	}
 	servers, err := ReadMCPServers(claudeJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read MCP servers: %w", err)
@@ -975,7 +976,10 @@ func (s *Syncer) PullMCP(ctx context.Context) (*MCPPullResult, error) {
 	}
 
 	// Read local servers
-	claudeJSON := s.claudeJSONPath()
+	claudeJSON, err := s.claudeJSONPath()
+	if err != nil {
+		return nil, err
+	}
 	localServers, err := ReadMCPServers(claudeJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read local MCP servers: %w", err)
@@ -1050,7 +1054,10 @@ type MCPStatusResult struct {
 }
 
 func (s *Syncer) MCPStatus(ctx context.Context) (*MCPStatusResult, error) {
-	claudeJSON := s.claudeJSONPath()
+	claudeJSON, err := s.claudeJSONPath()
+	if err != nil {
+		return nil, err
+	}
 	servers, err := ReadMCPServers(claudeJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read MCP servers: %w", err)

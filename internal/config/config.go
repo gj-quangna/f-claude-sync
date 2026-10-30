@@ -12,21 +12,25 @@ import (
 )
 
 const (
-	ConfigDir  = ".claude-sync"
-	ConfigFile = "config.yaml"
-	StateFile  = "state.json"
-	AgeKeyFile = "age-key.txt"
+	StateFile = "state.json"
+
+	// Environment variables holding the location of each of claude-sync's own
+	// files. All three are required; there is no default location.
+	EnvConfigPath = "CLAUDE_SYNC_CONFIG_PATH"
+	EnvAgePath    = "CLAUDE_SYNC_AGE_PATH"
+	EnvStatePath  = "CLAUDE_SYNC_STATE_PATH"
 
 	// MCPRemoteKey is the remote storage key for synced MCP server configs.
 	// The _external/ prefix separates it from ~/.claude/-relative files.
 	MCPRemoteKey = "_external/mcp-servers.json"
-
-	// Sync scopes control which subset of ~/.claude is synced.
-	// ScopeFull (default) syncs everything in SyncPaths; ScopeSessions limits
-	// syncing to portable conversation data only.
-	ScopeFull     = "full"
-	ScopeSessions = "sessions"
 )
+
+// MCPSyncConfig is the mcp_sync block of config.yaml.
+type MCPSyncConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Path is the absolute path to the .claude.json holding mcpServers.
+	Path string `yaml:"path"`
+}
 
 type Config struct {
 	// New storage configuration (preferred)
@@ -39,25 +43,25 @@ type Config struct {
 	Bucket          string `yaml:"bucket,omitempty"`
 	Endpoint        string `yaml:"endpoint,omitempty"`
 
-	// Common fields
-	EncryptionKey string `yaml:"encryption_key_path"`
+	// EncryptionKey is the age key path, always taken from $CLAUDE_SYNC_AGE_PATH
+	// (never read from or written to the config file).
+	EncryptionKey string `yaml:"-"`
 
-	// Exclude patterns (glob-style) for paths to skip during sync
-	Exclude []string `yaml:"exclude,omitempty"`
+	// SyncPaths lists absolute paths inside ~/.claude to sync. It is the
+	// single source of truth: there is no built-in fallback, and an empty or
+	// invalid list is rejected by the syncer (see RequireSyncPaths). init
+	// writes DefaultSyncPaths here. Remote keys stay ~/.claude-relative.
+	SyncPaths []string `yaml:"sync_paths"`
 
-	// Scope selects which subset of ~/.claude to sync: "full" (default, empty)
-	// or "sessions" (portable conversation data only). See ScopedSyncPaths.
-	Scope string `yaml:"scope,omitempty"`
+	// Exclude patterns (doublestar globs) for paths to skip during sync. An
+	// absolute pattern inside ~/.claude matches that location; a relative
+	// pattern (e.g. "**/node_modules/**") is matched against ~/.claude-relative
+	// paths.
+	Exclude []string `yaml:"exclude"`
 
-	// SyncPaths overrides the scope-based default paths when non-empty.
-	// Use GetEffectiveSyncPaths() to get the actual paths to sync.
-	SyncPaths []string `yaml:"sync_paths,omitempty"`
-
-	// MCPSync enables syncing MCP server configs from ~/.claude.json.
-	// Pointer type allows distinguishing between unset (nil), enabled (true),
-	// and explicitly disabled (false). Nil is treated as disabled for backward
-	// compatibility with existing configs.
-	MCPSync *bool `yaml:"mcp_sync,omitempty"`
+	// MCPSync controls syncing MCP server configs from a .claude.json file.
+	// When missing from the file it defaults to enabled with ~/.claude.json.
+	MCPSync *MCPSyncConfig `yaml:"mcp_sync"`
 
 	// PathMap maps local directory prefixes to shared token names so project
 	// sessions stay resumable across devices with different layouts.
@@ -80,8 +84,9 @@ type Config struct {
 	ClaudeJSONOverride string `yaml:"-"`
 }
 
-// SyncPaths defines which paths under ~/.claude to sync in the default "full" scope.
-var SyncPaths = []string{
+// DefaultSyncNames are the entries under ~/.claude that init and 'paths reset'
+// put into sync_paths (as absolute paths, see DefaultSyncPaths).
+var DefaultSyncNames = []string{
 	"CLAUDE.md",
 	"settings.json",
 	"settings.local.json",
@@ -97,54 +102,89 @@ var SyncPaths = []string{
 	"workflows",
 }
 
-// SessionSyncPaths is the subset synced in the "sessions" scope: portable,
-// high-value conversation data and its per-project work state. It deliberately
-// excludes plugins/ (which bundles non-portable node_modules and .venv trees),
-// along with machine-specific settings, skills, agents, and commands.
-var SessionSyncPaths = []string{
-	"projects",
-	"history.jsonl",
-	"tasks",
-	"plans",
+// DefaultSyncPaths returns DefaultSyncNames as absolute paths under claudeDir.
+// It is only a template: the syncer reads Config.SyncPaths.
+func DefaultSyncPaths(claudeDir string) []string {
+	out := make([]string, len(DefaultSyncNames))
+	for i, name := range DefaultSyncNames {
+		out[i] = filepath.Join(claudeDir, name)
+	}
+	return out
 }
 
-// ScopedSyncPaths returns the sync path set for the given scope. "sessions"
-// limits syncing to SessionSyncPaths; "full", empty, or any unrecognized value
-// returns the complete SyncPaths so existing configs keep their behavior.
-func ScopedSyncPaths(scope string) []string {
-	if scope == ScopeSessions {
-		return SessionSyncPaths
+// RelSyncPath validates that p is an absolute path strictly inside claudeDir
+// and returns it relative to claudeDir with forward slashes.
+func RelSyncPath(p, claudeDir string) (string, error) {
+	if strings.TrimSpace(p) == "" {
+		return "", fmt.Errorf("sync path cannot be empty")
 	}
-	return SyncPaths
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("sync path %q must be absolute, e.g. %s", p, filepath.Join(claudeDir, filepath.Clean(p)))
+	}
+	rel, err := filepath.Rel(claudeDir, filepath.Clean(p))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("sync path %q must be inside %s", p, claudeDir)
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 // ErrNoHomeDir is returned when the user's home directory cannot be determined.
 var ErrNoHomeDir = fmt.Errorf("could not determine home directory (is $HOME set?)")
 
-func ConfigDirPath() string {
-	path, _ := ConfigDirPathE()
-	return path
+// ConfigFilePath returns the config.yaml path from $CLAUDE_SYNC_CONFIG_PATH.
+func ConfigFilePath() (string, error) {
+	return pathFromEnv(EnvConfigPath)
 }
 
-// ConfigDirPathE returns the config directory path or an error if home dir is unavailable.
-func ConfigDirPathE() (string, error) {
+// StateFilePath returns the state.json path from $CLAUDE_SYNC_STATE_PATH.
+func StateFilePath() (string, error) {
+	return pathFromEnv(EnvStatePath)
+}
+
+// AgeKeyFilePath returns the age key path from $CLAUDE_SYNC_AGE_PATH.
+func AgeKeyFilePath() (string, error) {
+	return pathFromEnv(EnvAgePath)
+}
+
+// CheckEnv returns an error naming every required path variable that is unset.
+func CheckEnv() error {
+	var missing []string
+	for _, v := range []string{EnvConfigPath, EnvAgePath, EnvStatePath} {
+		if os.Getenv(v) == "" {
+			missing = append(missing, v)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("required environment variable(s) not set: %s\n"+
+		"  claude-sync has no default location for its files; export each one, e.g.:\n"+
+		"    export %s=~/.config/claude-sync/config.yaml\n"+
+		"    export %s=~/.config/claude-sync/age-key.txt\n"+
+		"    export %s=~/.local/state/claude-sync/state.json",
+		strings.Join(missing, ", "), EnvConfigPath, EnvAgePath, EnvStatePath)
+}
+
+// pathFromEnv returns the value of envVar with a leading ~ expanded, or an
+// error when it is unset.
+func pathFromEnv(envVar string) (string, error) {
+	p := os.Getenv(envVar)
+	if p == "" {
+		return "", fmt.Errorf("$%s is not set: claude-sync has no default location for this file, export it first", envVar)
+	}
+	return expandHome(p), nil
+}
+
+// expandHome expands a leading "~" or "~/" to the user's home directory.
+func expandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", ErrNoHomeDir
+		return p
 	}
-	return filepath.Join(home, ConfigDir), nil
-}
-
-func ConfigFilePath() string {
-	return filepath.Join(ConfigDirPath(), ConfigFile)
-}
-
-func StateFilePath() string {
-	return filepath.Join(ConfigDirPath(), StateFile)
-}
-
-func AgeKeyFilePath() string {
-	return filepath.Join(ConfigDirPath(), AgeKeyFile)
+	return filepath.Join(home, p[1:])
 }
 
 func ClaudeDir() string {
@@ -171,7 +211,14 @@ func ClaudeJSONPath() string {
 }
 
 func Load() (*Config, error) {
-	configPath := ConfigFilePath()
+	configPath, err := ConfigFilePath()
+	if err != nil {
+		return nil, err
+	}
+	keyPath, err := AgeKeyFilePath()
+	if err != nil {
+		return nil, err
+	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -186,10 +233,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
-	// Expand ~ in encryption key path
-	if cfg.EncryptionKey != "" && cfg.EncryptionKey[0] == '~' {
-		home, _ := os.UserHomeDir()
-		cfg.EncryptionKey = filepath.Join(home, cfg.EncryptionKey[1:])
+	cfg.EncryptionKey = keyPath
+	if cfg.MCPSync == nil {
+		cfg.MCPSync = &MCPSyncConfig{Enabled: true, Path: ClaudeJSONPath()}
 	}
 
 	// Expand ~ in path_map keys
@@ -214,8 +260,11 @@ func Load() (*Config, error) {
 }
 
 func Save(cfg *Config) error {
-	configDir := ConfigDirPath()
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	configPath, err := ConfigFilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -224,7 +273,6 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("failed to serialize config: %w", err)
 	}
 
-	configPath := ConfigFilePath()
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
@@ -232,8 +280,14 @@ func Save(cfg *Config) error {
 	return nil
 }
 
+// Exists reports whether the config file exists. It is false when
+// $CLAUDE_SYNC_CONFIG_PATH is unset.
 func Exists() bool {
-	_, err := os.Stat(ConfigFilePath())
+	configPath, err := ConfigFilePath()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(configPath)
 	return err == nil
 }
 
@@ -260,61 +314,68 @@ func (c *Config) IsLegacyConfig() bool {
 	return c.Storage == nil && c.AccountID != ""
 }
 
-// GetEffectiveSyncPaths returns the paths to sync: custom SyncPaths if set,
-// otherwise the scope-based defaults.
-//
-// Scope is a ceiling, not merely a default. Under ScopeSessions the custom list
-// is intersected with SessionSyncPaths so a sync_paths entry can never widen a
-// sessions-scoped config back into non-portable trees like plugins/ (which
-// bundles node_modules and .venv). Under "full" scope the custom list wins
-// outright, since there is nothing narrower to protect.
-//
-// This matters because `claude-sync paths add|remove` materializes the entire
-// default path list into SyncPaths, so most configs carrying a sync_paths block
-// never explicitly opted into one.
-//
-// The result is never empty: an empty set would make DetectChanges observe zero
-// local files and report every tracked file as a deletion, wiping the remote on
-// the next push. If a custom list shares nothing with the scope, the scope
-// defaults are used instead.
-func (c *Config) GetEffectiveSyncPaths() []string {
-	scoped := ScopedSyncPaths(c.Scope)
+// ClaudeDirPath returns the ~/.claude directory, honoring ClaudeDirOverride.
+func (c *Config) ClaudeDirPath() string {
+	if c.ClaudeDirOverride != "" {
+		return c.ClaudeDirOverride
+	}
+	return ClaudeDir()
+}
+
+// RequireSyncPaths returns an error when sync_paths is empty or holds an entry
+// that is not an absolute path inside ~/.claude. Syncing an empty set would
+// make DetectChanges observe zero local files and report every tracked file as
+// a deletion, wiping the remote on the next push.
+func (c *Config) RequireSyncPaths() error {
 	if len(c.SyncPaths) == 0 {
-		return scoped
+		return fmt.Errorf("sync_paths is empty in config.yaml: add entries with 'claude-sync paths add <absolute path>' or restore the defaults with 'claude-sync paths reset'")
 	}
+	_, err := c.RelSyncPaths(c.ClaudeDirPath())
+	return err
+}
 
-	if c.Scope != ScopeSessions {
-		return c.SyncPaths
-	}
-
-	allowed := make(map[string]struct{}, len(scoped))
-	for _, p := range scoped {
-		allowed[p] = struct{}{}
-	}
-
-	// Preserve the user's ordering, keeping only in-scope entries.
-	within := make([]string, 0, len(c.SyncPaths))
+// RelSyncPaths converts sync_paths to claudeDir-relative paths, the form used
+// for walking and for remote keys.
+func (c *Config) RelSyncPaths(claudeDir string) ([]string, error) {
+	rel := make([]string, 0, len(c.SyncPaths))
 	for _, p := range c.SyncPaths {
-		if _, ok := allowed[p]; ok {
-			within = append(within, p)
+		r, err := RelSyncPath(p, claudeDir)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sync_paths entry in config.yaml: %w", err)
 		}
+		rel = append(rel, r)
 	}
-
-	if len(within) == 0 {
-		return scoped
-	}
-	return within
+	return rel, nil
 }
 
-// IsMCPSyncEnabled returns true if MCP sync is explicitly enabled.
-// Returns false if MCPSync is nil (unset) or false.
+// IsMCPSyncEnabled reports whether MCP sync is enabled. Unset (nil) means
+// enabled, matching the mcp_sync default.
 func (c *Config) IsMCPSyncEnabled() bool {
-	return c.MCPSync != nil && *c.MCPSync
+	return c.MCPSync == nil || c.MCPSync.Enabled
 }
 
-// SetMCPSync sets the MCP sync state. Pass true to enable, false to explicitly disable.
+// SetMCPSync sets mcp_sync.enabled, keeping the configured path (or filling
+// in ~/.claude.json when the block is missing).
 func (c *Config) SetMCPSync(enabled bool) {
-	c.MCPSync = &enabled
+	if c.MCPSync == nil {
+		c.MCPSync = &MCPSyncConfig{Path: ClaudeJSONPath()}
+	}
+	c.MCPSync.Enabled = enabled
+}
+
+// MCPConfigPath returns mcp_sync.path, the absolute path to the .claude.json
+// whose mcpServers are synced. A missing block means ~/.claude.json.
+func (c *Config) MCPConfigPath() (string, error) {
+	if c.MCPSync == nil {
+		return ClaudeJSONPath(), nil
+	}
+	if c.MCPSync.Path == "" {
+		return "", fmt.Errorf("mcp_sync.path is empty in config.yaml: set it to the absolute path of .claude.json")
+	}
+	if !filepath.IsAbs(c.MCPSync.Path) {
+		return "", fmt.Errorf("mcp_sync.path %q in config.yaml must be an absolute path", c.MCPSync.Path)
+	}
+	return c.MCPSync.Path, nil
 }
 
 // IsExcluded returns true if the given relative path matches any exclude pattern.
@@ -324,10 +385,23 @@ func (c *Config) SetMCPSync(enabled bool) {
 //   - Directory prefix (e.g. "plugins/marketplace" matches everything under it)
 //   - Filename glob (e.g. "*.tmp" matches "foo/bar/file.tmp")
 func (c *Config) IsExcluded(relPath string) bool {
+	return c.IsExcludedUnder(c.ClaudeDirPath(), relPath)
+}
+
+// IsExcludedUnder is IsExcluded with an explicit ~/.claude directory, used to
+// turn absolute patterns into claudeDir-relative ones.
+func (c *Config) IsExcludedUnder(claudeDir, relPath string) bool {
 	// Normalize path separators for consistent matching
 	relPath = filepath.ToSlash(relPath)
 
 	for _, pattern := range c.Exclude {
+		if filepath.IsAbs(pattern) {
+			rel, err := filepath.Rel(claudeDir, pattern)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue // outside ~/.claude: can never match a synced file
+			}
+			pattern = rel
+		}
 		// Normalize pattern separators
 		pattern = filepath.ToSlash(pattern)
 

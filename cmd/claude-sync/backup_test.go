@@ -28,7 +28,7 @@ func TestCreateBackupSetsRestrictivePermissions(t *testing.T) {
 		t.Fatalf("Failed to create helper.json: %v", err)
 	}
 
-	backupDir, err := createBackup(config.SyncPaths)
+	backupDir, err := createBackup(config.DefaultSyncNames)
 	if err != nil {
 		t.Fatalf("createBackup failed: %v", err)
 	}

@@ -3,6 +3,7 @@ package sync
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tawanorg/claude-sync/internal/config"
@@ -19,7 +20,7 @@ func TestSyncerHonorsCustomSyncPaths(t *testing.T) {
 		}
 	}
 
-	cfg := &config.Config{SyncPaths: []string{"CLAUDE.md", "my-extra-file.md"}}
+	cfg := &config.Config{SyncPaths: []string{filepath.Join(dir, "CLAUDE.md"), filepath.Join(dir, "my-extra-file.md")}}
 	s := &Syncer{cfg: cfg, claudeDir: dir}
 
 	got, err := GetLocalFiles(dir, s.syncPaths(), s.isExcluded)
@@ -35,10 +36,9 @@ func TestSyncerHonorsCustomSyncPaths(t *testing.T) {
 	}
 }
 
-// TestSyncerScopeCeilingBlocksPluginsLeak verifies that a materialized
-// sync_paths list cannot widen a sessions-scoped config back into plugins/,
-// which bundles non-portable node_modules and .venv trees.
-func TestSyncerScopeCeilingBlocksPluginsLeak(t *testing.T) {
+// TestSyncerExcludeFiltersInsideSyncPath verifies that exclude globs from
+// config.yaml drop files inside a synced directory (e.g. plugins/node_modules).
+func TestSyncerExcludeFiltersInsideSyncPath(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "plugins", "node_modules"), 0700); err != nil {
 		t.Fatal(err)
@@ -46,31 +46,48 @@ func TestSyncerScopeCeilingBlocksPluginsLeak(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "plugins", "node_modules", "big.js"), []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "projects"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "projects", "a.jsonl"), []byte("x"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "plugins", "plugin.json"), []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := &config.Config{
-		Scope:     config.ScopeSessions,
-		SyncPaths: append([]string{}, config.SyncPaths...), // what `paths add` writes
-	}
-	s := &Syncer{cfg: cfg, claudeDir: dir}
+	for _, pattern := range []string{"**/node_modules/**", filepath.Join(dir, "plugins", "node_modules", "**")} {
+		cfg := &config.Config{
+			SyncPaths: []string{filepath.Join(dir, "plugins")},
+			Exclude:   []string{pattern},
+		}
+		s := &Syncer{cfg: cfg, claudeDir: dir}
 
-	got, err := GetLocalFiles(dir, s.syncPaths(), s.isExcluded)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for p := range got {
-		if filepath.ToSlash(p) == "plugins/node_modules/big.js" {
-			t.Fatalf("sessions scope uploaded plugins/: %v", sortedKeys(got))
+		got, err := GetLocalFiles(dir, s.syncPaths(), s.isExcluded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := got["plugins/node_modules/big.js"]; ok {
+			t.Fatalf("exclude %q: excluded file was collected: %v", pattern, sortedKeys(got))
+		}
+		if _, ok := got["plugins/plugin.json"]; !ok {
+			t.Errorf("exclude %q: non-excluded file missing: %v", pattern, sortedKeys(got))
 		}
 	}
-	if _, ok := got["projects/a.jsonl"]; !ok {
-		t.Errorf("in-scope path missing: %v", sortedKeys(got))
+}
+
+// TestNewSyncerRejectsRelativeSyncPaths ensures sync_paths entries must be
+// absolute paths inside ~/.claude.
+func TestNewSyncerRejectsRelativeSyncPaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{"projects", "/etc", dir} {
+		_, err := NewSyncer(&config.Config{SyncPaths: []string{p}, ClaudeDirOverride: dir}, true)
+		if err == nil || !strings.Contains(err.Error(), "sync_paths") {
+			t.Errorf("sync path %q: err = %v, want sync_paths error", p, err)
+		}
+	}
+}
+
+// TestNewSyncerRejectsEmptySyncPaths guards against an empty sync_paths list,
+// which would make push report every tracked file as deleted.
+func TestNewSyncerRejectsEmptySyncPaths(t *testing.T) {
+	_, err := NewSyncer(&config.Config{}, true)
+	if err == nil || !strings.Contains(err.Error(), "sync_paths") {
+		t.Errorf("NewSyncer with empty sync_paths: err = %v, want sync_paths error", err)
 	}
 }
 
