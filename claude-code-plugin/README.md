@@ -64,7 +64,6 @@ Claude will walk you through:
 | `/sync-diff` | Show differences between local and remote |
 | `/sync-conflicts` | List and resolve sync conflicts |
 | `/sync-reset` | Reset configuration (forgot passphrase) |
-| `/sync-update` | Update claude-sync CLI |
 | `/sync-help` | Show all commands and options |
 
 ### Command Options
@@ -96,12 +95,6 @@ Claude will walk you through:
 /sync-reset             # Clear local config only
 /sync-reset --remote    # Also delete files from cloud storage
 /sync-reset --local     # Also clear local sync state
-```
-
-#### `/sync-update`
-```
-/sync-update            # Update to latest version
-/sync-update --check    # Only check for updates
 ```
 
 ### Auto-Sync
@@ -210,7 +203,6 @@ claude-code-plugin/
 │   ├── sync-diff.md         # Diff command
 │   ├── sync-conflicts.md    # Conflict resolution
 │   ├── sync-reset.md        # Reset configuration
-│   ├── sync-update.md       # Update CLI
 │   └── sync-help.md         # Help and reference
 └── README.md
 ```

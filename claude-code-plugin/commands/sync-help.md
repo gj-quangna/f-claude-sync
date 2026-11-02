@@ -18,7 +18,6 @@ Display available commands and their options.
 | `/sync-diff` | Show differences between local and remote |
 | `/sync-conflicts` | List and resolve sync conflicts |
 | `/sync-reset` | Reset configuration (forgot passphrase) |
-| `/sync-update` | Update claude-sync CLI |
 | `/sync-help` | Show this help |
 
 ## Init Options

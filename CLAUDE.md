@@ -26,7 +26,7 @@ go test -tags=integration -v ./integration/...
 # or: cd integration && docker-compose up --build
 ```
 
-Every command except `update`, `changelog`, `help` and `completion` fails fast unless all three `CLAUDE_SYNC_*_PATH` variables are set (see On-disk layout), so export them before running the binary by hand.
+Every command except `changelog`, `help` and `completion` fails fast unless all three `CLAUDE_SYNC_*_PATH` variables are set (see On-disk layout), so export them before running the binary by hand.
 
 Version is injected at build time: `-ldflags "-X main.version=<version>"`. `make build` pulls the version from `git describe --tags --always --dirty`.
 
@@ -34,7 +34,7 @@ Version is injected at build time: `-ldflags "-X main.version=<version>"`. `make
 
 Layered, with a pluggable storage abstraction:
 
-- **CLI layer** — `cmd/claude-sync/main.go`. Cobra commands (`init`, `push`, `pull`, `status`, `diff`, `conflicts`, `rebuild-history`, `reset`, `migrate`, `update`, `changelog`, `mcp`, `auto`, `paths`) plus Survey-driven interactive wizards. All user-facing output lives here. The root `PersistentPreRunE` runs `config.CheckEnv()`.
+- **CLI layer** — `cmd/claude-sync/main.go`. Cobra commands (`init`, `push`, `pull`, `status`, `diff`, `conflicts`, `rebuild-history`, `reset`, `migrate`, `changelog`, `mcp`, `auto`, `paths`) plus Survey-driven interactive wizards. All user-facing output lives here. The root `PersistentPreRunE` runs `config.CheckEnv()`.
 - **Sync layer** — `internal/sync/`. `Syncer` orchestrates push/pull; `SyncState` (`state.json`) tracks per-file SHA256 hash + size + mtime + last-uploaded time. `DetectChanges` compares local files against state to produce `add/modify/delete` work items. Push/pull both run uploads/downloads with a worker pool (`defaultWorkers = 10`). `PathMapper` (`paths.go`) rewrites machine-specific project paths to portable tokens (see Sync semantics).
 - **Crypto layer** — `internal/crypto/encrypt.go`. Wraps `filippo.io/age` (X25519 + ChaCha20-Poly1305). Supports two key modes: random (`GenerateKey`) or passphrase-derived (`GenerateKeyFromPassphrase`, Argon2id with a **fixed salt** `sha256("claude-sync-v1")` so the same passphrase yields the same key on any device). The derived 32 bytes are clamped for X25519 then Bech32-encoded as an `AGE-SECRET-KEY-…` identity.
 - **Storage layer** — `internal/storage/`. `Storage` interface (`Upload`/`Download`/`Delete`/`DeleteBatch`/`List`/`Head`/`BucketExists`) with four adapters: `r2/` (AWS SDK v2 pointed at `<account>.r2.cloudflarestorage.com`), `s3/` (AWS SDK v2, also used for S3-compatible endpoints), `gcs/` (Google Cloud Storage SDK), `webdav/`. Adapters **self-register** via `init()` functions setting package-level `storage.NewR2` / `NewS3` / `NewGCS` / `NewWebDAV` vars; `cmd/claude-sync/main.go` blank-imports them to wire up the factory (`storage.New`). Add new providers by following this pattern.
@@ -69,10 +69,10 @@ Resolve paths only via `config.ConfigFilePath()` / `AgeKeyFilePath()` / `StateFi
 
 ## Distribution & release
 
-> This describes the upstream pipeline. In this fork `main` only mirrors `upstream/main` and development happens on `me`; semantic-release, CI and release workflows trigger on `main` only, so nothing runs for `me` — use `make check` locally.
+> This describes the upstream pipeline. In this fork `main` only mirrors `upstream/main` and development happens on `me`; semantic-release, CI and `release.yml` trigger on `main` only. Fork releases come from `build-release.yml`: push a tag `v*` on a commit of `me` (not reachable from `main`) → gofmt/vet/test, build 6 binaries, GitHub Release with `checksums.txt`. Use `make check` locally before tagging.
 
 - Pre-built binaries ship as 6 platform-specific npm packages under `npm/<platform>/` (`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, `win32-arm64`, `win32-x64`). `package.json` lists them as `optionalDependencies`; npm installs only the one matching the host. `bin/claude-sync.js` resolves and execs the right binary.
-- Releases are automated via **semantic-release** (`.releaserc.json`) on pushes to `main`. The `prepareCmd` runs `VERSION=${nextRelease.version} make build-all`, then uploads the 4 Unix binaries plus `checksums.txt` to GitHub Releases. `install.js` / `claude-sync update` both download from the GitHub Releases API.
+- Releases are automated via **semantic-release** (`.releaserc.json`) on pushes to `main`. The `prepareCmd` runs `VERSION=${nextRelease.version} make build-all`, then uploads the 4 Unix binaries plus `checksums.txt` to GitHub Releases. `install.js` downloads from the GitHub Releases API. This fork removed `claude-sync update` (it fetched upstream `tawanorg/claude-sync` releases and would overwrite the fork binary); do not reintroduce it.
 - Version bumps come from Conventional Commits (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE` → major). Don't hand-edit `CHANGELOG.md` or the version in `package.json` — semantic-release owns both.
 
 ## CI & pre-commit

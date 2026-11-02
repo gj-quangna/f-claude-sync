@@ -25,7 +25,6 @@
 - **Passphrase-based keys**: Same passphrase = same key on any device (no file copying)
 - **Selective sync**: `sync_paths` and `exclude` globs in `config.yaml` decide exactly what is synced
 - **Interactive wizard**: Arrow-key driven setup with validation
-- **Secure self-updating**: `claude-sync update` downloads and verifies SHA256 checksums
 - **Simple CLI**: `push`, `pull`, `status`, `diff`, `conflicts` commands
 - **Compression**: Gzip compression before encryption for faster syncs
 - **Shell integration**: Optional shell hooks for automatic push/pull
@@ -251,7 +250,7 @@ Synced verbatim, those would be **different projects** and `claude --resume` on 
 
 ## File Locations (required)
 
-claude-sync has **no default location** for its own files. All three environment variables must be set, otherwise every command (except `update`, `changelog`, `help`) exits with an error listing the missing ones. A leading `~` is expanded.
+claude-sync has **no default location** for its own files. All three environment variables must be set, otherwise every command (except `changelog`, `help`, `completion`) exits with an error listing the missing ones. A leading `~` is expanded.
 
 | Variable | File |
 |----------|------|
@@ -279,7 +278,6 @@ claude-sync conflicts   # List and resolve conflicts
 claude-sync rebuild-history  # Rebuild ~/.claude/history.jsonl from session files
 claude-sync reset       # Reset configuration (forgot passphrase)
 claude-sync migrate     # Convert legacy remote keys to portable path-mapped keys
-claude-sync update      # Update to latest version (verifies release checksums)
 claude-sync changelog   # Show release history
 claude-sync --help      # Show all commands
 ```
@@ -323,12 +321,9 @@ claude-sync push -q     # No output (for scripts)
 claude-sync pull -q
 ```
 
-### Check for Updates
+### Updating
 
-```bash
-claude-sync update --check   # Check without installing
-claude-sync update           # Download and install latest version
-```
+This fork has no `update` command (it would install the upstream `tawanorg/claude-sync` binary). Download a binary from this fork's GitHub Releases, or rebuild with `make build`.
 
 ### Changelog
 
@@ -438,7 +433,6 @@ claude-sync push             # Re-upload from this device
 - Passphrase is never stored - only the derived key at `~/.claude-sync/age-key.txt`
 - Cloud storage is private (API key/IAM auth)
 - Config files and downloads stored with 0600/0700 permissions (user-only)
-- Self-update verifies SHA256 checksums before installing new binaries
 - Backward compatible: can read both compressed and uncompressed remote files
 
 ## Cost
