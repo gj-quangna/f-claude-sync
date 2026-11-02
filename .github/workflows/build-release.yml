@@ -1,7 +1,7 @@
 name: Build & Release
 
 # Fork release pipeline: pushing a tag v* that points at a commit on branch
-# `me` builds all platform binaries and publishes a GitHub Release.
+# `me` builds the Linux binaries and publishes a GitHub Release.
 # Tag filters cannot match on branch, so the `verify` job enforces it.
 on:
   push:
@@ -56,19 +56,20 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # Linux only to keep release builds fast. Uncomment to ship more OSes.
         include:
-          - goos: windows
-            goarch: amd64
-            ext: .exe
-          - goos: windows
-            goarch: arm64
-            ext: .exe
-          - goos: darwin
-            goarch: amd64
-            ext: ""
-          - goos: darwin
-            goarch: arm64
-            ext: ""
+          # - goos: windows
+          #   goarch: amd64
+          #   ext: .exe
+          # - goos: windows
+          #   goarch: arm64
+          #   ext: .exe
+          # - goos: darwin
+          #   goarch: amd64
+          #   ext: ""
+          # - goos: darwin
+          #   goarch: arm64
+          #   ext: ""
           - goos: linux
             goarch: amd64
             ext: ""

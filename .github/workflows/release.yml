@@ -1,8 +1,12 @@
 name: Release
 
+# Upstream semantic-release + npm publish. Disabled in this fork: `main` only
+# mirrors upstream, and pushing it must not create releases here. Fork
+# releases come from build-release.yml (tags on `me`).
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+#  push:
+#    branches: [main]
 
 permissions:
   contents: write
