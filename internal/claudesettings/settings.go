@@ -20,16 +20,22 @@ import (
 const (
 	// HookCommandPull is the command installed for SessionStart.
 	HookCommandPull = "claude-sync pull -q"
-	// HookCommandPush is the command installed for Stop.
+	// HookCommandPush is the command installed for SessionEnd.
 	HookCommandPush = "claude-sync push -q"
+	// HookPushTimeout is the push hook timeout in seconds. SessionEnd hooks
+	// share a 1.5s budget unless a hook sets a longer timeout (max 60s).
+	HookPushTimeout = 60
 
 	// HookTypeCommand is the standard hook type for shell commands.
 	HookTypeCommand = "command"
 
 	// EventSessionStart is the hook event for session start.
 	EventSessionStart = "SessionStart"
-	// EventStop is the hook event for session stop.
-	EventStop = "Stop"
+	// EventSessionEnd is the hook event for session end.
+	EventSessionEnd = "SessionEnd"
+	// EventLegacyStop is the per-turn event older versions used for push.
+	// Enable and Disable remove claude-sync hooks found there.
+	EventLegacyStop = "Stop"
 )
 
 // SettingsRepository defines the interface for settings persistence.
@@ -51,6 +57,7 @@ type CommandMatcher interface {
 type HookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
+	Timeout int    `json:"timeout,omitempty"`
 }
 
 // HookGroup represents a matcher + list of hooks for an event.
@@ -71,7 +78,8 @@ type Settings struct {
 type AutoSyncStatus struct {
 	Enabled         bool
 	HasSessionStart bool
-	HasStop         bool
+	HasSessionEnd   bool
+	HasLegacyStop   bool
 }
 
 // AutoSyncConfig defines the hooks to install for auto-sync.
@@ -80,6 +88,7 @@ type AutoSyncConfig struct {
 	PushCommand string
 	PullEvent   string
 	PushEvent   string
+	PushTimeout int
 }
 
 // DefaultAutoSyncConfig returns the standard auto-sync configuration.
@@ -88,7 +97,8 @@ func DefaultAutoSyncConfig() AutoSyncConfig {
 		PullCommand: HookCommandPull,
 		PushCommand: HookCommandPush,
 		PullEvent:   EventSessionStart,
-		PushEvent:   EventStop,
+		PushEvent:   EventSessionEnd,
+		PushTimeout: HookPushTimeout,
 	}
 }
 
@@ -295,6 +305,7 @@ func HasMatchingHook(groups []HookGroup, matcher CommandMatcher) bool {
 type HookEntryBuilder struct {
 	hookType string
 	command  string
+	timeout  int
 }
 
 // NewHookEntry creates a new hook entry builder.
@@ -314,14 +325,26 @@ func (b *HookEntryBuilder) WithCommand(cmd string) *HookEntryBuilder {
 	return b
 }
 
+// WithTimeout sets the hook timeout in seconds (0 = Claude Code default).
+func (b *HookEntryBuilder) WithTimeout(seconds int) *HookEntryBuilder {
+	b.timeout = seconds
+	return b
+}
+
 // Build creates the HookEntry.
 func (b *HookEntryBuilder) Build() HookEntry {
-	return HookEntry{Type: b.hookType, Command: b.command}
+	return HookEntry{Type: b.hookType, Command: b.command, Timeout: b.timeout}
 }
 
 // AddHook appends a new hook group with a single command entry.
 func AddHook(groups []HookGroup, command string) []HookGroup {
-	entry := NewHookEntry().WithCommand(command).Build()
+	return AddHookWithTimeout(groups, command, 0)
+}
+
+// AddHookWithTimeout appends a new hook group with a single command entry
+// that has the given timeout in seconds (0 = Claude Code default).
+func AddHookWithTimeout(groups []HookGroup, command string, timeout int) []HookGroup {
+	entry := NewHookEntry().WithCommand(command).WithTimeout(timeout).Build()
 	return append(groups, HookGroup{
 		Matcher: "",
 		Hooks:   []HookEntry{entry},
@@ -358,7 +381,8 @@ func RemoveMatchingHooks(groups []HookGroup, matcher CommandMatcher) []HookGroup
 
 // --- Auto-Sync Operations ---
 
-// EnableAutoSync adds claude-sync hooks for SessionStart and Stop events.
+// EnableAutoSync adds claude-sync hooks for SessionStart and SessionEnd events
+// and drops the push hook older versions installed on Stop.
 // Returns true if any changes were made, false if hooks were already present.
 func (s *Settings) EnableAutoSync() bool {
 	return s.EnableAutoSyncWithConfig(DefaultAutoSyncConfig())
@@ -375,14 +399,32 @@ func (s *Settings) EnableAutoSyncWithConfig(cfg AutoSyncConfig) bool {
 	}
 
 	if !HasClaudeSyncHook(s.Hooks[cfg.PushEvent]) {
-		s.Hooks[cfg.PushEvent] = AddHook(s.Hooks[cfg.PushEvent], cfg.PushCommand)
+		s.Hooks[cfg.PushEvent] = AddHookWithTimeout(s.Hooks[cfg.PushEvent], cfg.PushCommand, cfg.PushTimeout)
+		changed = true
+	}
+
+	if cfg.PushEvent != EventLegacyStop && s.removeClaudeSyncHooks(EventLegacyStop) {
 		changed = true
 	}
 
 	return changed
 }
 
-// DisableAutoSync removes all claude-sync hooks from SessionStart and Stop events.
+// removeClaudeSyncHooks drops claude-sync hooks from one event, deleting the
+// event when nothing is left. Returns true if any hook was removed.
+func (s *Settings) removeClaudeSyncHooks(event string) bool {
+	if !HasClaudeSyncHook(s.Hooks[event]) {
+		return false
+	}
+	s.Hooks[event] = RemoveClaudeSyncHooks(s.Hooks[event])
+	if len(s.Hooks[event]) == 0 {
+		delete(s.Hooks, event)
+	}
+	return true
+}
+
+// DisableAutoSync removes all claude-sync hooks from SessionStart, SessionEnd
+// and the legacy Stop event.
 // Returns true if any changes were made, false if no hooks were present.
 func (s *Settings) DisableAutoSync() bool {
 	return s.DisableAutoSyncWithConfig(DefaultAutoSyncConfig())
@@ -390,34 +432,21 @@ func (s *Settings) DisableAutoSync() bool {
 
 // DisableAutoSyncWithConfig removes hooks from the specified events.
 func (s *Settings) DisableAutoSyncWithConfig(cfg AutoSyncConfig) bool {
-	hadPull := HasClaudeSyncHook(s.Hooks[cfg.PullEvent])
-	hadPush := HasClaudeSyncHook(s.Hooks[cfg.PushEvent])
-
-	if !hadPull && !hadPush {
-		return false
-	}
-
-	s.Hooks[cfg.PullEvent] = RemoveClaudeSyncHooks(s.Hooks[cfg.PullEvent])
-	s.Hooks[cfg.PushEvent] = RemoveClaudeSyncHooks(s.Hooks[cfg.PushEvent])
-
-	// Clean up empty slices to keep JSON clean
-	if len(s.Hooks[cfg.PullEvent]) == 0 {
-		delete(s.Hooks, cfg.PullEvent)
-	}
-	if len(s.Hooks[cfg.PushEvent]) == 0 {
-		delete(s.Hooks, cfg.PushEvent)
-	}
-
-	return true
+	removedPull := s.removeClaudeSyncHooks(cfg.PullEvent)
+	removedPush := s.removeClaudeSyncHooks(cfg.PushEvent)
+	removedLegacy := s.removeClaudeSyncHooks(EventLegacyStop)
+	return removedPull || removedPush || removedLegacy
 }
 
 // AutoSyncStatus returns the current state of auto-sync hooks.
 func (s *Settings) AutoSyncStatus() AutoSyncStatus {
 	hasStart := HasClaudeSyncHook(s.Hooks[EventSessionStart])
-	hasStop := HasClaudeSyncHook(s.Hooks[EventStop])
+	hasEnd := HasClaudeSyncHook(s.Hooks[EventSessionEnd])
+	hasLegacy := HasClaudeSyncHook(s.Hooks[EventLegacyStop])
 	return AutoSyncStatus{
-		Enabled:         hasStart || hasStop,
+		Enabled:         hasStart || hasEnd || hasLegacy,
 		HasSessionStart: hasStart,
-		HasStop:         hasStop,
+		HasSessionEnd:   hasEnd,
+		HasLegacyStop:   hasLegacy,
 	}
 }

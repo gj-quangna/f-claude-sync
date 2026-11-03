@@ -2787,9 +2787,10 @@ func autoEnableCmd() *cobra.Command {
 		Short: "Install auto-sync hooks into Claude Code",
 		Long: `Adds hooks to ~/.claude/settings.json:
   - SessionStart: runs "claude-sync pull -q" when a session begins
-  - Stop: runs "claude-sync push -q" when a session ends
+  - SessionEnd: runs "claude-sync push -q" when a session ends (timeout 60s)
 
-Existing hooks are preserved. This command is idempotent.`,
+A claude-sync push hook on Stop (installed by older versions, fires after
+every reply) is removed. Other hooks are preserved. This command is idempotent.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := claudesettings.SettingsPath("")
 
@@ -2810,7 +2811,7 @@ Existing hooks are preserved. This command is idempotent.`,
 			if dryRun {
 				fmt.Printf("%s⋯%s Dry run: would install auto-sync hooks:\n", colorDim, colorReset)
 				fmt.Printf("    SessionStart → %s\n", claudesettings.HookCommandPull)
-				fmt.Printf("    Stop → %s\n", claudesettings.HookCommandPush)
+				fmt.Printf("    SessionEnd → %s\n", claudesettings.HookCommandPush)
 				return nil
 			}
 
@@ -2821,7 +2822,7 @@ Existing hooks are preserved. This command is idempotent.`,
 			if !quiet {
 				fmt.Printf("%s✓%s Auto-sync hooks installed:\n", colorGreen, colorReset)
 				fmt.Printf("    SessionStart → %s\n", claudesettings.HookCommandPull)
-				fmt.Printf("    Stop → %s\n", claudesettings.HookCommandPush)
+				fmt.Printf("    SessionEnd → %s\n", claudesettings.HookCommandPush)
 			}
 
 			return nil
@@ -2899,8 +2900,11 @@ func autoStatusCmd() *cobra.Command {
 				if status.HasSessionStart {
 					fmt.Printf("    SessionStart → %s\n", claudesettings.HookCommandPull)
 				}
-				if status.HasStop {
-					fmt.Printf("    Stop → %s\n", claudesettings.HookCommandPush)
+				if status.HasSessionEnd {
+					fmt.Printf("    SessionEnd → %s\n", claudesettings.HookCommandPush)
+				}
+				if status.HasLegacyStop {
+					fmt.Printf("    %s!%s Stop → claude-sync (legacy, pushes after every reply); run '%sclaude-sync auto enable%s' to move it to SessionEnd\n", colorYellow, colorReset, colorCyan, colorReset)
 				}
 			} else {
 				fmt.Printf("%s⋯%s Auto-sync: %snot installed%s\n", colorDim, colorReset, colorDim, colorReset)

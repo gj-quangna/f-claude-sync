@@ -263,8 +263,11 @@ func TestDefaultAutoSyncConfig(t *testing.T) {
 	if cfg.PullEvent != EventSessionStart {
 		t.Errorf("PullEvent = %q, want %q", cfg.PullEvent, EventSessionStart)
 	}
-	if cfg.PushEvent != EventStop {
-		t.Errorf("PushEvent = %q, want %q", cfg.PushEvent, EventStop)
+	if cfg.PushEvent != EventSessionEnd {
+		t.Errorf("PushEvent = %q, want %q", cfg.PushEvent, EventSessionEnd)
+	}
+	if cfg.PushTimeout != HookPushTimeout {
+		t.Errorf("PushTimeout = %d, want %d", cfg.PushTimeout, HookPushTimeout)
 	}
 }
 
@@ -664,8 +667,15 @@ func TestEnableAutoSync(t *testing.T) {
 	if !HasClaudeSyncHook(settings.Hooks["SessionStart"]) {
 		t.Error("SessionStart hook should be added")
 	}
-	if !HasClaudeSyncHook(settings.Hooks["Stop"]) {
-		t.Error("Stop hook should be added")
+	end := settings.Hooks["SessionEnd"]
+	if !HasClaudeSyncHook(end) {
+		t.Error("SessionEnd hook should be added")
+	}
+	if len(end) != 1 || end[0].Hooks[0].Timeout != HookPushTimeout {
+		t.Errorf("SessionEnd push hook should have timeout %d, got %+v", HookPushTimeout, end)
+	}
+	if _, ok := settings.Hooks["Stop"]; ok {
+		t.Error("Stop hook should not be added")
 	}
 
 	// Save and reload
@@ -704,8 +714,45 @@ func TestDisableAutoSync(t *testing.T) {
 	if HasClaudeSyncHook(settings.Hooks["SessionStart"]) {
 		t.Error("SessionStart hook should be removed")
 	}
+	if HasClaudeSyncHook(settings.Hooks["SessionEnd"]) {
+		t.Error("SessionEnd hook should be removed")
+	}
+}
+
+func TestAutoSyncMigratesLegacyStopHook(t *testing.T) {
+	settings := NewSettings()
+	settings.Hooks["SessionStart"] = AddHook(nil, HookCommandPull)
+	settings.Hooks["Stop"] = AddHook(AddHook(nil, "echo other"), HookCommandPush)
+
+	status := settings.AutoSyncStatus()
+	if !status.HasLegacyStop || status.HasSessionEnd {
+		t.Errorf("status before enable = %+v, want legacy Stop only", status)
+	}
+
+	if !settings.EnableAutoSync() {
+		t.Error("EnableAutoSync should return true when migrating Stop")
+	}
 	if HasClaudeSyncHook(settings.Hooks["Stop"]) {
-		t.Error("Stop hook should be removed")
+		t.Error("legacy Stop claude-sync hook should be removed")
+	}
+	if len(settings.Hooks["Stop"]) != 1 {
+		t.Errorf("non-claude-sync Stop hook should be kept, got %+v", settings.Hooks["Stop"])
+	}
+	if !HasClaudeSyncHook(settings.Hooks["SessionEnd"]) {
+		t.Error("SessionEnd hook should be added")
+	}
+	if settings.EnableAutoSync() {
+		t.Error("second EnableAutoSync should be a no-op")
+	}
+
+	// Disable also clears a legacy Stop hook on its own
+	settings = NewSettings()
+	settings.Hooks["Stop"] = AddHook(nil, HookCommandPush)
+	if !settings.DisableAutoSync() {
+		t.Error("DisableAutoSync should remove legacy Stop hook")
+	}
+	if _, ok := settings.Hooks["Stop"]; ok {
+		t.Error("empty Stop event should be deleted")
 	}
 }
 
@@ -725,8 +772,11 @@ func TestAutoSyncStatus(t *testing.T) {
 	if !status.HasSessionStart {
 		t.Error("HasSessionStart should be true")
 	}
-	if !status.HasStop {
-		t.Error("HasStop should be true")
+	if !status.HasSessionEnd {
+		t.Error("HasSessionEnd should be true")
+	}
+	if status.HasLegacyStop {
+		t.Error("HasLegacyStop should be false")
 	}
 }
 
@@ -776,8 +826,11 @@ func TestIntegrationRoundTrip(t *testing.T) {
 	if !HasClaudeSyncHook(settings2.Hooks["SessionStart"]) {
 		t.Error("SessionStart hook missing")
 	}
-	if !HasClaudeSyncHook(settings2.Hooks["Stop"]) {
-		t.Error("Stop hook missing")
+	if !HasClaudeSyncHook(settings2.Hooks["SessionEnd"]) {
+		t.Error("SessionEnd hook missing")
+	}
+	if settings2.Hooks["SessionEnd"][0].Hooks[0].Timeout != HookPushTimeout {
+		t.Error("SessionEnd timeout not preserved")
 	}
 
 	// Verify other fields preserved by reading raw JSON
